@@ -308,6 +308,57 @@ input, select, button { font-family: inherit; font-size: 0.9rem; }
 
 .filter-bar input { flex: 1; min-width: 100px; }
 
+.preset-bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.preset-label { font-size: 0.85rem; color: #888; }
+
+.preset-bar select,
+.preset-bar input {
+  padding: 6px 8px;
+  border: 1px solid #333;
+  border-radius: 5px;
+  background: #1a1d27;
+  color: #fff;
+  font-size: 0.85rem;
+}
+
+.preset-bar select { flex: 1 1 120px; min-width: 110px; }
+.preset-bar input { flex: 1 1 100px; min-width: 90px; }
+
+.preset-btn {
+  padding: 5px 10px;
+  border: 1px solid #444;
+  border-radius: 5px;
+  background: transparent;
+  color: #ccc;
+  font-size: 0.8rem;
+}
+
+.preset-btn:hover { background: #2a2d3a; }
+.preset-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.preset-keys {
+  font-size: 0.72rem;
+  color: #666;
+  letter-spacing: 0.2px;
+}
+
+.preset-status {
+  flex: 1 1 100%;
+  font-size: 0.78rem;
+  color: #888;
+  min-height: 1em;
+}
+
+.preset-status.error { color: #e74c3c; }
+.preset-status.ok { color: #2ecc71; }
+
 #clips-list {
   flex: 1;
   overflow-y: auto;

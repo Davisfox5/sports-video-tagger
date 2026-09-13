@@ -115,13 +115,25 @@
       <h3>Clips</h3>
       <div class="filter-bar">
         <label>Filter:</label>
-        <select id="filter-tag-type">
+        <select id="filter-tag-type" aria-label="Filter by tag type">
           <option value="">All Types</option>
         </select>
-        <select id="filter-player">
+        <select id="filter-player" aria-label="Filter by player">
           <option value="">All Players</option>
         </select>
-        <input type="text" id="filter-search" placeholder="Search labels...">
+        <input type="text" id="filter-search" placeholder="Search labels..." aria-label="Search clips">
+      </div>
+      <div class="preset-bar" role="group" aria-labelledby="preset-bar-label">
+        <span id="preset-bar-label" class="preset-label">Saved:</span>
+        <select id="filter-preset-select" aria-label="Saved filter presets" title="Restore a saved filter (P)">
+          <option value="">No saved filters</option>
+        </select>
+        <input type="text" id="filter-preset-name" maxlength="60" placeholder="Preset name" aria-label="Preset name" title="Name, then Enter to save">
+        <button type="button" id="btn-preset-save" class="preset-btn" title="Save current filters">Save</button>
+        <button type="button" id="btn-preset-rename" class="preset-btn" title="Rename selected preset">Rename</button>
+        <button type="button" id="btn-preset-delete" class="preset-btn" title="Delete selected preset">Delete</button>
+        <span class="preset-keys" title="Keyboard shortcuts">P select · Enter save</span>
+        <span id="preset-status" class="preset-status" role="status" aria-live="polite"></span>
       </div>
       <div id="clips-list"></div>
       <div class="clip-count"><span id="clip-count-num">0</span> clips</div>

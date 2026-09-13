@@ -2,6 +2,10 @@
 let currentProject = null;
 let markIn = null;
 let markOut = null;
+let filterPresets = [];
+let selectedPresetId = "";
+let applyingPreset = false;
+let projectViewVersion = 0;
 
 /* ── DOM refs ─────────────────────────────────────────────────────── */
 const $projectListScreen = document.getElementById("project-list-screen");
@@ -33,6 +37,13 @@ const $clipCount    = document.getElementById("clip-count-num");
 
 const $filterPlayer = document.getElementById("filter-player");
 const $playerChecks = document.getElementById("player-checkboxes");
+
+const $presetSelect = document.getElementById("filter-preset-select");
+const $presetName   = document.getElementById("filter-preset-name");
+const $presetStatus = document.getElementById("preset-status");
+const $btnPresetSave   = document.getElementById("btn-preset-save");
+const $btnPresetRename = document.getElementById("btn-preset-rename");
+const $btnPresetDelete = document.getElementById("btn-preset-delete");
 
 const $tagModal     = document.getElementById("tag-modal");
 const $tagTypeList  = document.getElementById("tag-type-list");
@@ -108,7 +119,10 @@ $newProjectName.addEventListener("keydown", (e) => {
 
 /* ── Open / Close Project ─────────────────────────────────────────── */
 async function openProject(id) {
-  currentProject = await api(`/api/projects/${id}`);
+  const version = ++projectViewVersion;
+  const project = await api(`/api/projects/${id}`);
+  if (version !== projectViewVersion) return;
+  currentProject = project;
   $projectTitle.textContent = currentProject.name;
   $projectListScreen.classList.remove("active");
   $taggingScreen.classList.add("active");
@@ -131,14 +145,37 @@ async function openProject(id) {
 
   if (!currentProject.players) currentProject.players = [];
 
+  // Never leak the previous project's filters or selected preset.
+  filterPresets = [];
+  selectedPresetId = "";
+  applyingPreset = false;
+  $filterType.value = "";
+  $filterPlayer.value = "";
+  $filterSearch.value = "";
+  $presetName.value = "";
+  $presetSelect.innerHTML = '<option value="">No saved filters</option>';
+  setPresetStatus("");
+
   populateTagSelectors();
   populatePlayerSelectors();
+  $filterType.value = "";
+  $filterPlayer.value = "";
   renderClips();
+  loadFilterPresets();
 }
 
 document.getElementById("btn-back").addEventListener("click", () => {
+  projectViewVersion++;
   exitAnnotationMode();
   currentProject = null;
+  filterPresets = [];
+  selectedPresetId = "";
+  $filterType.value = "";
+  $filterPlayer.value = "";
+  $filterSearch.value = "";
+  $presetName.value = "";
+  $presetSelect.innerHTML = '<option value="">No saved filters</option>';
+  setPresetStatus("");
   $video.pause();
   $video.src = "";
   $taggingScreen.classList.remove("active");
@@ -207,14 +244,27 @@ $btnSaveClip.addEventListener("click", async () => {
   renderClips();
 });
 
+function ensureSelectValue(select, value, missingLabel) {
+  if (value == null) value = "";
+  if (value !== "" && !Array.from(select.options).some(o => o.value === value)) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = missingLabel;
+    select.appendChild(opt);
+  }
+  select.value = value;
+}
+
 /* ── Populate Tag Selectors ───────────────────────────────────────── */
 function populateTagSelectors() {
+  const prevFilter = $filterType.value;
   $clipTagType.innerHTML = '<option value="">-- Tag Type --</option>';
   $filterType.innerHTML = '<option value="">All Types</option>';
   currentProject.tag_types.forEach(tt => {
     $clipTagType.innerHTML += `<option value="${esc(tt.name)}">${esc(tt.name)}</option>`;
     $filterType.innerHTML  += `<option value="${esc(tt.name)}">${esc(tt.name)}</option>`;
   });
+  ensureSelectValue($filterType, prevFilter, prevFilter ? `${prevFilter} (missing)` : "");
 }
 
 /* ── Player Selectors ─────────────────────────────────────────────── */
@@ -241,12 +291,15 @@ function populatePlayerSelectors() {
     });
   }
 
-  // Player filter dropdown
+  // Player filter dropdown — keep a stale player id explicit so an old
+  // preset never silently falls back to "All Players".
+  const prevPlayer = $filterPlayer.value;
   $filterPlayer.innerHTML = '<option value="">All Players</option>';
   players.forEach(p => {
     const display = p.number ? `#${p.number} ${p.name}` : p.name;
     $filterPlayer.innerHTML += `<option value="${p.id}">${esc(display)}</option>`;
   });
+  ensureSelectValue($filterPlayer, prevPlayer, prevPlayer ? `Missing player ${prevPlayer}` : "");
 }
 
 function getSelectedPlayerIds() {
@@ -274,7 +327,7 @@ function getPlayerDisplay(playerId) {
 function filteredClips() {
   const typeFilter = $filterType.value;
   const playerFilter = $filterPlayer.value;
-  const search = $filterSearch.value.toLowerCase();
+  const search = $filterSearch.value.trim().toLowerCase();
   return currentProject.clips.filter(c => {
     if (typeFilter && c.tag_type !== typeFilter) return false;
     if (playerFilter && !(c.players || []).includes(playerFilter)) return false;
@@ -348,9 +401,17 @@ function renderClips() {
   renderTimeline();
 }
 
-$filterType.addEventListener("change", renderClips);
-$filterPlayer.addEventListener("change", renderClips);
-$filterSearch.addEventListener("input", renderClips);
+function onFilterChanged() {
+  if (!applyingPreset) {
+    selectedPresetId = "";
+    if ($presetSelect) $presetSelect.value = "";
+  }
+  renderClips();
+}
+
+$filterType.addEventListener("change", onFilterChanged);
+$filterPlayer.addEventListener("change", onFilterChanged);
+$filterSearch.addEventListener("input", onFilterChanged);
 
 /* ── Play Clip ────────────────────────────────────────────────────── */
 let clipEndHandler = null;
@@ -547,6 +608,184 @@ document.getElementById("roster-upload").addEventListener("change", async (e) =>
   // Reset file input so the same file can be re-uploaded
   e.target.value = "";
   setTimeout(() => { $status.textContent = ""; }, 4000);
+});
+
+/* ── Saved filter presets ─────────────────────────────────────────── */
+function setPresetStatus(msg, kind) {
+  $presetStatus.textContent = msg || "";
+  $presetStatus.className = "preset-status" + (kind ? " " + kind : "");
+}
+
+function renderPresetSelect() {
+  const keep = selectedPresetId;
+  $presetSelect.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = filterPresets.length ? "Select a preset" : "No saved filters";
+  $presetSelect.appendChild(placeholder);
+  filterPresets.forEach(p => {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = p.name;
+    $presetSelect.appendChild(opt);
+  });
+  const stillThere = filterPresets.some(p => p.id === keep);
+  selectedPresetId = stillThere ? keep : "";
+  $presetSelect.value = selectedPresetId;
+}
+
+async function loadFilterPresets() {
+  if (!currentProject) return;
+  const version = projectViewVersion;
+  setPresetStatus("Loading presets…");
+  try {
+    const data = await api(`/api/projects/${currentProject.id}/filter_presets`);
+    if (version !== projectViewVersion) return;
+    if (!Array.isArray(data)) {
+      filterPresets = [];
+      renderPresetSelect();
+      setPresetStatus(data.error || "Could not load presets", "error");
+      return;
+    }
+    filterPresets = data;
+    renderPresetSelect();
+    setPresetStatus(filterPresets.length ? "" : "No saved filters yet.");
+  } catch (err) {
+    if (version !== projectViewVersion) return;
+    filterPresets = [];
+    renderPresetSelect();
+    setPresetStatus("Could not load presets", "error");
+  }
+}
+
+function applyPreset(preset) {
+  applyingPreset = true;
+  ensureSelectValue(
+    $filterType,
+    preset.tag_type || "",
+    preset.tag_type ? `${preset.tag_type} (missing)` : ""
+  );
+  ensureSelectValue(
+    $filterPlayer,
+    preset.player || "",
+    preset.player ? `Missing player ${preset.player}` : ""
+  );
+  $filterSearch.value = preset.search || "";
+  selectedPresetId = preset.id;
+  $presetSelect.value = preset.id;
+  applyingPreset = false;
+  renderClips();
+}
+
+function currentFilterPayload(name) {
+  return {
+    name,
+    tag_type: $filterType.value,
+    player: $filterPlayer.value,
+    search: $filterSearch.value,
+  };
+}
+
+async function saveCurrentPreset() {
+  if (!currentProject) return;
+  const version = projectViewVersion;
+  setPresetStatus("Saving…");
+  try {
+    const data = await api(`/api/projects/${currentProject.id}/filter_presets`, {
+      method: "POST",
+      body: JSON.stringify(currentFilterPayload($presetName.value)),
+    });
+    if (version !== projectViewVersion) return;
+    if (data.error) {
+      setPresetStatus(data.error, "error");
+      return;
+    }
+    filterPresets.push(data);
+    selectedPresetId = data.id;
+    $presetName.value = "";
+    renderPresetSelect();
+    setPresetStatus(`Saved “${data.name}”.`, "ok");
+  } catch (err) {
+    if (version !== projectViewVersion) return;
+    setPresetStatus("Could not save preset", "error");
+  }
+}
+
+async function renameSelectedPreset() {
+  if (!currentProject) return;
+  const version = projectViewVersion;
+  if (!selectedPresetId) {
+    setPresetStatus("Select a preset to rename.", "error");
+    return;
+  }
+  setPresetStatus("Renaming…");
+  try {
+    const data = await api(
+      `/api/projects/${currentProject.id}/filter_presets/${selectedPresetId}`,
+      { method: "PUT", body: JSON.stringify({ name: $presetName.value }) }
+    );
+    if (version !== projectViewVersion) return;
+    if (data.error) {
+      setPresetStatus(data.error, "error");
+      return;
+    }
+    const idx = filterPresets.findIndex(p => p.id === data.id);
+    if (idx >= 0) filterPresets[idx] = data;
+    $presetName.value = "";
+    renderPresetSelect();
+    setPresetStatus(`Renamed to “${data.name}”.`, "ok");
+  } catch (err) {
+    if (version !== projectViewVersion) return;
+    setPresetStatus("Could not rename preset", "error");
+  }
+}
+
+async function deleteSelectedPreset() {
+  if (!currentProject) return;
+  const version = projectViewVersion;
+  if (!selectedPresetId) {
+    setPresetStatus("Select a preset to delete.", "error");
+    return;
+  }
+  const removing = selectedPresetId;
+  setPresetStatus("Deleting…");
+  try {
+    const data = await api(
+      `/api/projects/${currentProject.id}/filter_presets/${removing}`,
+      { method: "DELETE" }
+    );
+    if (version !== projectViewVersion) return;
+    if (data.error) {
+      setPresetStatus(data.error, "error");
+      return;
+    }
+    filterPresets = filterPresets.filter(p => p.id !== removing);
+    selectedPresetId = "";
+    renderPresetSelect();
+    setPresetStatus(filterPresets.length ? "Preset deleted." : "No saved filters yet.", "ok");
+  } catch (err) {
+    if (version !== projectViewVersion) return;
+    setPresetStatus("Could not delete preset", "error");
+  }
+}
+
+$presetSelect.addEventListener("change", () => {
+  const id = $presetSelect.value;
+  selectedPresetId = id;
+  if (!id) return;
+  const preset = filterPresets.find(p => p.id === id);
+  if (preset) applyPreset(preset);
+});
+
+$btnPresetSave.addEventListener("click", saveCurrentPreset);
+$btnPresetRename.addEventListener("click", renameSelectedPreset);
+$btnPresetDelete.addEventListener("click", deleteSelectedPreset);
+
+$presetName.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    saveCurrentPreset();
+  }
 });
 
 /* ── Export ────────────────────────────────────────────────────────── */
@@ -892,6 +1131,10 @@ document.addEventListener("keydown", (e) => {
       break;
     case "o":
       $btnMarkOut.click();
+      break;
+    case "p":
+      e.preventDefault();
+      $presetSelect.focus();
       break;
     case " ":
       e.preventDefault();

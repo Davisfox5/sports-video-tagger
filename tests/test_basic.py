@@ -15,8 +15,10 @@ def client(tmp_path, monkeypatch):
     """Create a test client with a temp data directory."""
     monkeypatch.setattr(application, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(application, "VIDEOS_DIR", str(tmp_path / "videos"))
+    monkeypatch.setattr(application, "RECORDINGS_DIR", str(tmp_path / "recordings"))
     monkeypatch.setattr(application, "PROJECTS_FILE", str(tmp_path / "projects.json"))
     os.makedirs(tmp_path / "videos", exist_ok=True)
+    os.makedirs(tmp_path / "recordings", exist_ok=True)
     application.app.config["TESTING"] = True
     with application.app.test_client() as c:
         yield c
@@ -1041,3 +1043,292 @@ def test_adjust_clips_trim():
     c = [c for c in result if c["id"] == "c"][0]
     assert c["start"] == 15
     assert c["end"] == 20
+
+
+# ── Filter Preset Tests ───────────────────────────────────────────────
+
+def _create_preset(client, pid, name, tag_type="", player="", search=""):
+    return client.post(f"/api/projects/{pid}/filter_presets", json={
+        "name": name, "tag_type": tag_type, "player": player, "search": search,
+    })
+
+
+def test_filter_preset_crud(client):
+    rv = client.post("/api/projects", json={"name": "Preset CRUD"})
+    pid = rv.get_json()["id"]
+
+    rv = _create_preset(client, pid, "Goals only", tag_type="Goal", search="header")
+    assert rv.status_code == 201
+    preset = rv.get_json()
+    assert preset["name"] == "Goals only"
+    assert preset["tag_type"] == "Goal"
+    assert preset["player"] == ""
+    assert preset["search"] == "header"
+    assert "id" in preset
+    pid_preset = preset["id"]
+
+    rv = client.get(f"/api/projects/{pid}/filter_presets")
+    assert rv.status_code == 200
+    listed = rv.get_json()
+    assert len(listed) == 1
+    assert listed[0]["id"] == pid_preset
+
+    rv = client.put(
+        f"/api/projects/{pid}/filter_presets/{pid_preset}",
+        json={"name": "Alice goals", "player": "abc123"},
+    )
+    assert rv.status_code == 200
+    updated = rv.get_json()
+    assert updated["name"] == "Alice goals"
+    assert updated["player"] == "abc123"
+    assert updated["tag_type"] == "Goal"
+    assert updated["search"] == "header"
+
+    rv = client.delete(f"/api/projects/{pid}/filter_presets/{pid_preset}")
+    assert rv.status_code == 200
+    rv = client.get(f"/api/projects/{pid}/filter_presets")
+    assert rv.get_json() == []
+
+
+def test_filter_preset_persists_on_disk(client):
+    rv = client.post("/api/projects", json={"name": "Persist Presets"})
+    pid = rv.get_json()["id"]
+    rv = _create_preset(client, pid, "Shots", tag_type="Shot")
+    assert rv.status_code == 201
+    preset_id = rv.get_json()["id"]
+
+    projects = application._load_projects()
+    presets = projects[pid]["filter_presets"]
+    assert len(presets) == 1
+    assert presets[0]["id"] == preset_id
+    assert presets[0]["name"] == "Shots"
+    assert presets[0]["tag_type"] == "Shot"
+
+
+def test_filter_presets_are_per_project(client):
+    a = client.post("/api/projects", json={"name": "Game A"}).get_json()["id"]
+    b = client.post("/api/projects", json={"name": "Game B"}).get_json()["id"]
+
+    _create_preset(client, a, "A only", tag_type="Goal")
+    _create_preset(client, b, "B only", tag_type="Shot")
+
+    names_a = [p["name"] for p in client.get(f"/api/projects/{a}/filter_presets").get_json()]
+    names_b = [p["name"] for p in client.get(f"/api/projects/{b}/filter_presets").get_json()]
+    assert names_a == ["A only"]
+    assert names_b == ["B only"]
+
+
+def test_filter_preset_validation(client):
+    rv = client.post("/api/projects", json={"name": "Validate"})
+    pid = rv.get_json()["id"]
+
+    rv = _create_preset(client, pid, "")
+    assert rv.status_code == 400
+    assert "required" in rv.get_json()["error"].lower()
+
+    rv = _create_preset(client, pid, "   ")
+    assert rv.status_code == 400
+
+    rv = _create_preset(client, pid, "x" * 61)
+    assert rv.status_code == 400
+    assert "60" in rv.get_json()["error"]
+
+    rv = _create_preset(client, pid, "x" * 60, tag_type="Goal")
+    assert rv.status_code == 201
+
+    rv = _create_preset(client, pid, "Keepers")
+    assert rv.status_code == 201
+    rv = _create_preset(client, pid, "keepers")
+    assert rv.status_code == 409
+    assert "already exists" in rv.get_json()["error"]
+
+    rv = client.post(
+        f"/api/projects/{pid}/filter_presets",
+        json={"name": 12, "tag_type": "Goal"},
+    )
+    assert rv.status_code == 400
+
+    rv = client.post(
+        f"/api/projects/{pid}/filter_presets",
+        json={"name": "Bad type", "tag_type": ["Goal"]},
+    )
+    assert rv.status_code == 400
+
+    rv = client.post(
+        f"/api/projects/{pid}/filter_presets",
+        data="[]",
+        content_type="application/json",
+    )
+    assert rv.status_code == 400
+    assert "JSON object" in rv.get_json()["error"]
+
+    rv = client.post(
+        f"/api/projects/{pid}/filter_presets",
+        data="not-json",
+        content_type="application/json",
+    )
+    assert rv.status_code == 400
+
+
+def test_filter_preset_legacy_project_without_key(client):
+    rv = client.post("/api/projects", json={"name": "Legacy"})
+    pid = rv.get_json()["id"]
+    client.post(f"/api/projects/{pid}/players", json={"name": "Pat", "number": "4"})
+    client.post(f"/api/projects/{pid}/clips", json={
+        "tag_type": "Goal", "start": 1, "end": 2, "label": "legacy clip",
+    })
+
+    projects = application._load_projects()
+    assert "filter_presets" not in projects[pid]
+    clips_before = json.loads(json.dumps(projects[pid]["clips"]))
+    players_before = json.loads(json.dumps(projects[pid]["players"]))
+
+    rv = client.get(f"/api/projects/{pid}/filter_presets")
+    assert rv.status_code == 200
+    assert rv.get_json() == []
+
+    # Listing must not persist a presets key or mutate clips/players.
+    reloaded = application._load_projects()
+    assert "filter_presets" not in reloaded[pid]
+    assert reloaded[pid]["clips"] == clips_before
+    assert reloaded[pid]["players"] == players_before
+
+    rv = _create_preset(client, pid, "From legacy", tag_type="Goal")
+    assert rv.status_code == 201
+    saved = application._load_projects()
+    assert saved[pid]["clips"] == clips_before
+    assert saved[pid]["players"] == players_before
+    assert len(saved[pid]["filter_presets"]) == 1
+
+
+def test_filter_preset_does_not_mutate_clips_or_players(client):
+    pid, p1, p2 = _make_project_with_clips(client)
+    clips_before = client.get(f"/api/projects/{pid}/clips").get_json()
+    players_before = client.get(f"/api/projects/{pid}/players").get_json()
+
+    rv = _create_preset(client, pid, "Keep roster", tag_type="Goal", player=p1)
+    assert rv.status_code == 201
+    preset_id = rv.get_json()["id"]
+    client.put(
+        f"/api/projects/{pid}/filter_presets/{preset_id}",
+        json={"name": "Still keep roster"},
+    )
+    client.delete(f"/api/projects/{pid}/filter_presets/{preset_id}")
+
+    assert client.get(f"/api/projects/{pid}/clips").get_json() == clips_before
+    assert client.get(f"/api/projects/{pid}/players").get_json() == players_before
+
+
+def test_filter_preset_keeps_stale_player_and_tag(client):
+    rv = client.post("/api/projects", json={"name": "Stale refs"})
+    pid = rv.get_json()["id"]
+    player = client.post(
+        f"/api/projects/{pid}/players", json={"name": "Gone", "number": "9"}
+    ).get_json()
+    client.post(f"/api/projects/{pid}/clips", json={
+        "tag_type": "Goal", "start": 1, "end": 3, "players": [player["id"]],
+    })
+
+    rv = _create_preset(
+        client, pid, "Gone player goals", tag_type="Goal", player=player["id"]
+    )
+    preset_id = rv.get_json()["id"]
+
+    client.delete(f"/api/projects/{pid}/players/{player['id']}")
+    client.put(f"/api/projects/{pid}/tag_types", json={
+        "tag_types": [{"name": "Shot", "color": "#3498db"}],
+    })
+
+    stored = client.get(f"/api/projects/{pid}/filter_presets").get_json()[0]
+    assert stored["id"] == preset_id
+    assert stored["player"] == player["id"]
+    assert stored["tag_type"] == "Goal"
+
+    # Applying the stored values must still filter — not broaden to all clips.
+    csv_text = client.get(
+        f"/api/projects/{pid}/export/csv?tag_type={stored['tag_type']}&player={stored['player']}"
+    ).data.decode("utf-8")
+    assert csv_text.strip().count("\n") == 1  # Header plus the original matching clip.
+    # Player was removed from roster but clip still tags that id, so 1 data row.
+    assert "Goal" in csv_text
+
+
+def test_filter_preset_put_partial_and_not_found(client):
+    rv = client.post("/api/projects", json={"name": "Partial"})
+    pid = rv.get_json()["id"]
+    created = _create_preset(
+        client, pid, "Original", tag_type="Pass", player="p1", search="note"
+    ).get_json()
+
+    rv = client.put(
+        f"/api/projects/{pid}/filter_presets/{created['id']}",
+        json={"name": "Original"},
+    )
+    assert rv.status_code == 200
+    body = rv.get_json()
+    assert body["tag_type"] == "Pass"
+    assert body["player"] == "p1"
+    assert body["search"] == "note"
+
+    rv = client.put(
+        f"/api/projects/{pid}/filter_presets/nope",
+        json={"name": "X"},
+    )
+    assert rv.status_code == 404
+    rv = client.delete(f"/api/projects/{pid}/filter_presets/nope")
+    assert rv.status_code == 404
+    assert client.get("/api/projects/nope/filter_presets").status_code == 404
+    assert client.post(
+        "/api/projects/nope/filter_presets", json={"name": "X"}
+    ).status_code == 404
+
+
+def test_filter_preset_search_whitespace_stripped(client):
+    pid, _, _ = _make_project_with_clips(client)
+    rv = _create_preset(client, pid, "Wide shots", search="  wide  ")
+    assert rv.status_code == 201
+    assert rv.get_json()["search"] == "wide"
+
+    stored = rv.get_json()["search"]
+    csv_rv = client.get(f"/api/projects/{pid}/export/csv?search={stored}")
+    json_rv = client.get(f"/api/projects/{pid}/export/json?search={stored}")
+    csv_lines = csv_rv.data.decode("utf-8").strip().split("\n")
+    data = json.loads(json_rv.data)
+    assert len(csv_lines) == 2
+    assert data["clip_count"] == 1
+    assert data["clips"][0]["label"] == "Wide shot"
+
+
+def test_filter_preset_matches_csv_json_export(client):
+    pid, p1, p2 = _make_project_with_clips(client)
+    rv = _create_preset(
+        client, pid, "Alice first goal",
+        tag_type="Goal", player=p1, search="first",
+    )
+    assert rv.status_code == 201
+    preset = rv.get_json()
+
+    qs = (
+        f"tag_type={preset['tag_type']}"
+        f"&player={preset['player']}"
+        f"&search={preset['search']}"
+    )
+    csv_rv = client.get(f"/api/projects/{pid}/export/csv?{qs}")
+    json_rv = client.get(f"/api/projects/{pid}/export/json?{qs}")
+    assert csv_rv.status_code == 200
+    assert json_rv.status_code == 200
+
+    csv_lines = csv_rv.data.decode("utf-8").strip().split("\n")
+    data = json.loads(json_rv.data)
+    assert len(csv_lines) == 2  # header + 1 clip
+    assert data["clip_count"] == 1
+    assert data["clips"][0]["label"] == "First goal"
+    assert data["clips"][0]["tag_type"] == "Goal"
+    assert "First goal" in csv_rv.data.decode("utf-8")
+    assert "Second goal" not in csv_rv.data.decode("utf-8")
+    assert "Wide shot" not in csv_rv.data.decode("utf-8")
+
+    unfiltered = json.loads(
+        client.get(f"/api/projects/{pid}/export/json").data
+    )
+    assert unfiltered["clip_count"] == 3

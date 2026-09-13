@@ -333,6 +333,137 @@ def import_roster(project_id):
     return jsonify({"imported": len(imported), "skipped": skipped, "players": imported}), 201
 
 
+# ── Filter presets ────────────────────────────────────────────────────
+
+def _get_presets(project):
+    return project.setdefault("filter_presets", [])
+
+
+def _preset_json_body():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return None, (jsonify({"error": "Request body must be a JSON object"}), 400)
+    return data, None
+
+
+def _validate_preset_name(name, presets, exclude_id=None):
+    if not isinstance(name, str):
+        return None, (jsonify({"error": "name must be a string"}), 400)
+    name = name.strip()
+    if not name:
+        return None, (jsonify({"error": "Name is required"}), 400)
+    if len(name) > 60:
+        return None, (jsonify({"error": "Name must be 60 characters or fewer"}), 400)
+    for preset in presets:
+        if exclude_id is not None and preset["id"] == exclude_id:
+            continue
+        if preset["name"].lower() == name.lower():
+            return None, (jsonify({"error": f"A preset named '{name}' already exists"}), 409)
+    return name, None
+
+
+def _validate_preset_filter_value(field, value):
+    if not isinstance(value, str):
+        return None, (jsonify({"error": f"{field} must be a string"}), 400)
+    if field in ("tag_type", "search"):
+        value = value.strip()
+    return value, None
+
+
+@app.route("/api/projects/<project_id>/filter_presets", methods=["GET"])
+def list_filter_presets(project_id):
+    projects = _load_projects()
+    project = projects.get(project_id)
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+    return jsonify(_get_presets(project))
+
+
+@app.route("/api/projects/<project_id>/filter_presets", methods=["POST"])
+def create_filter_preset(project_id):
+    projects = _load_projects()
+    project = projects.get(project_id)
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+
+    data, err = _preset_json_body()
+    if err:
+        return err
+
+    presets = _get_presets(project)
+    name, err = _validate_preset_name(data.get("name"), presets)
+    if err:
+        return err
+
+    fields = {}
+    for field in ("tag_type", "player", "search"):
+        value, err = _validate_preset_filter_value(field, data.get(field, ""))
+        if err:
+            return err
+        fields[field] = value
+
+    preset = {
+        "id": str(uuid.uuid4())[:8],
+        "name": name,
+        "tag_type": fields["tag_type"],
+        "player": fields["player"],
+        "search": fields["search"],
+    }
+    presets.append(preset)
+    _save_projects(projects)
+    return jsonify(preset), 201
+
+
+@app.route("/api/projects/<project_id>/filter_presets/<preset_id>", methods=["PUT"])
+def update_filter_preset(project_id, preset_id):
+    projects = _load_projects()
+    project = projects.get(project_id)
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+
+    data, err = _preset_json_body()
+    if err:
+        return err
+
+    presets = _get_presets(project)
+    preset = next((p for p in presets if p["id"] == preset_id), None)
+    if not preset:
+        return jsonify({"error": "Preset not found"}), 404
+
+    if "name" in data:
+        name, err = _validate_preset_name(data["name"], presets, exclude_id=preset_id)
+        if err:
+            return err
+        preset["name"] = name
+
+    for field in ("tag_type", "player", "search"):
+        if field not in data:
+            continue
+        value, err = _validate_preset_filter_value(field, data[field])
+        if err:
+            return err
+        preset[field] = value
+
+    _save_projects(projects)
+    return jsonify(preset)
+
+
+@app.route("/api/projects/<project_id>/filter_presets/<preset_id>", methods=["DELETE"])
+def delete_filter_preset(project_id, preset_id):
+    projects = _load_projects()
+    project = projects.get(project_id)
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+
+    presets = _get_presets(project)
+    kept = [p for p in presets if p["id"] != preset_id]
+    if len(kept) == len(presets):
+        return jsonify({"error": "Preset not found"}), 404
+    project["filter_presets"] = kept
+    _save_projects(projects)
+    return jsonify({"ok": True})
+
+
 # ── Clips CRUD ─────────────────────────────────────────────────────────────
 
 @app.route("/api/projects/<project_id>/clips", methods=["GET"])
