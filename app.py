@@ -7,12 +7,15 @@ Tag clips in game footage, categorize them, and filter/review by type.
 import os
 import io
 import csv
+import copy
 import json
 import uuid
 import subprocess
 import tempfile
 import threading
 import functools
+import time
+from collections import Counter
 from flask import Flask, jsonify, request, send_from_directory, send_file, render_template
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
@@ -36,8 +39,30 @@ def _load_projects():
 
 
 def _save_projects(projects):
-    with open(PROJECTS_FILE, "w") as f:
-        json.dump(projects, f, indent=2)
+    tmp_path = None
+    try:
+        f = tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=os.path.dirname(PROJECTS_FILE),
+            prefix=".projects-",
+            suffix=".tmp",
+            delete=False,
+        )
+        tmp_path = f.name
+        try:
+            json.dump(projects, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        finally:
+            f.close()
+        os.replace(tmp_path, PROJECTS_FILE)
+    except BaseException:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+        raise
 
 
 _STORE_LOCK = threading.RLock()
@@ -557,6 +582,200 @@ def delete_clip(project_id, clip_id):
     projects[project_id]["clips"] = [c for c in clips if c["id"] != clip_id]
     _save_projects(projects)
     return jsonify({"ok": True})
+
+
+_BULK_PREVIEWS = {}
+_BULK_PREVIEW_TTL = 600
+
+
+def _prune_bulk_previews():
+    cutoff = time.time() - _BULK_PREVIEW_TTL
+    expired = [key for key, value in _BULK_PREVIEWS.items() if value["created"] <= cutoff]
+    for preview_id in expired:
+        del _BULK_PREVIEWS[preview_id]
+
+
+def _players_equal(a, b):
+    return set(a) == set(b)
+
+
+def _clip_fingerprint(clip):
+    snapshot = copy.deepcopy(clip)
+    snapshot["players"] = sorted(set(snapshot.get("players", [])))
+    snapshot.setdefault("notes", "")
+    snapshot.setdefault("annotations", [])
+    snapshot.setdefault("recordings", [])
+    return snapshot
+
+
+@app.route("/api/projects/<project_id>/clips/bulk_preview", methods=["POST"])
+@_locked
+def bulk_preview(project_id):
+    _prune_bulk_previews()
+    projects = _load_projects()
+    project = projects.get(project_id)
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not set(data) <= {"clip_ids", "changes"}:
+        return jsonify({"error": "Invalid request body", "code": "bad_request"}), 400
+    clip_ids = data.get("clip_ids")
+    changes = data.get("changes", {})
+    if (not isinstance(clip_ids, list)
+            or any(not isinstance(clip_id, str) for clip_id in clip_ids)
+            or not isinstance(changes, dict)
+            or not set(changes) <= {"tag_type", "players"}
+            or ("tag_type" in changes and not isinstance(changes["tag_type"], str))
+            or ("players" in changes and (not isinstance(changes["players"], list)
+                or any(not isinstance(player_id, str) for player_id in changes["players"])))):
+        return jsonify({"error": "Invalid request body", "code": "bad_request"}), 400
+    if not changes:
+        return jsonify({"error": "No changes requested", "code": "no_changes"}), 400
+    if not clip_ids:
+        return jsonify({"error": "No clip IDs provided", "code": "empty_clip_ids"}), 400
+
+    duplicate_clip_ids = [clip_id for clip_id, count in Counter(clip_ids).items() if count > 1]
+    if duplicate_clip_ids:
+        return jsonify({"error": "Duplicate clip IDs", "code": "duplicate_clip_ids",
+                        "ids": duplicate_clip_ids}), 400
+    if "tag_type" in changes and changes["tag_type"] not in {
+            tag_type["name"] for tag_type in project["tag_types"]}:
+        return jsonify({"error": "Invalid tag type", "code": "invalid_tag_type"}), 400
+
+    player_ids = changes.get("players", [])
+    duplicate_players = [player_id for player_id, count in Counter(player_ids).items() if count > 1]
+    if duplicate_players:
+        return jsonify({"error": "Duplicate player IDs", "code": "duplicate_players",
+                        "ids": duplicate_players}), 400
+    known_player_ids = {player["id"] for player in project.get("players", [])}
+    unknown_players = [player_id for player_id in player_ids if player_id not in known_player_ids]
+    if unknown_players:
+        return jsonify({"error": "Unknown player IDs", "code": "unknown_players",
+                        "ids": unknown_players}), 400
+
+    clips_by_id = {clip["id"]: clip for clip in project["clips"]}
+    unknown_clip_ids = [clip_id for clip_id in clip_ids if clip_id not in clips_by_id]
+    if unknown_clip_ids:
+        return jsonify({"error": "Unknown clip IDs", "code": "unknown_clip_ids",
+                        "ids": unknown_clip_ids}), 400
+
+    response_clips = []
+    snapshots = []
+    for clip_id in clip_ids:
+        clip = clips_by_id[clip_id]
+        before_players = list(clip.get("players", []))
+        after = {
+            "tag_type": changes.get("tag_type", clip["tag_type"]),
+            "players": list(changes.get("players", before_players)),
+        }
+        if after["tag_type"] == clip["tag_type"] and _players_equal(after["players"], before_players):
+            continue
+        snapshot = _clip_fingerprint(clip)
+        snapshots.append(snapshot)
+        response_clips.append({
+            "id": clip_id, "start": clip["start"], "end": clip["end"], "label": clip["label"],
+            "before": {"tag_type": clip["tag_type"], "players": before_players},
+            "after": after,
+        })
+
+    response_clips.sort(key=lambda clip: clip["start"])
+    snapshots.sort(key=lambda clip: clip["start"])
+    response = {
+        "preview_id": None, "project_id": project_id, "changes": changes,
+        "count": len(response_clips), "expires_in": _BULK_PREVIEW_TTL, "clips": response_clips,
+    }
+    if snapshots:
+        response["preview_id"] = uuid.uuid4().hex
+        _BULK_PREVIEWS[response["preview_id"]] = {
+            "project_id": project_id, "changes": changes, "clips": snapshots,
+            "created": time.time(),
+        }
+    return jsonify(response)
+
+
+@app.route("/api/projects/<project_id>/clips/bulk_apply", methods=["POST"])
+@_locked
+def bulk_apply(project_id):
+    data = request.get_json(silent=True)
+    if (not isinstance(data, dict)
+            or not isinstance(data.get("preview_id"), str)
+            or not data["preview_id"]):
+        return jsonify({"error": "Invalid request body", "code": "bad_request"}), 400
+
+    preview_id = data["preview_id"]
+    _prune_bulk_previews()
+    preview = _BULK_PREVIEWS.get(preview_id)
+    if preview is None:
+        return jsonify({
+            "error": "Preview expired or already applied — refresh and preview again",
+            "code": "preview_missing",
+        }), 409
+    if preview["project_id"] != project_id:
+        return jsonify({
+            "error": "Preview belongs to a different project",
+            "code": "preview_project_mismatch",
+        }), 409
+    preview = _BULK_PREVIEWS.pop(preview_id)
+
+    projects = _load_projects()
+    project = projects.get(project_id)
+    if project is None:
+        return jsonify({"error": "Project not found"}), 404
+
+    changes = preview["changes"]
+    if ("tag_type" in changes
+            and changes["tag_type"] not in {
+                tag_type["name"] for tag_type in project["tag_types"]
+            }):
+        return jsonify({
+            "error": "Bulk changes are no longer valid",
+            "code": "changes_invalid",
+        }), 409
+    known_player_ids = {player["id"] for player in project.get("players", [])}
+    if ("players" in changes
+            and any(player_id not in known_player_ids for player_id in changes["players"])):
+        return jsonify({
+            "error": "Bulk changes are no longer valid",
+            "code": "changes_invalid",
+        }), 409
+
+    clips_by_id = {clip["id"]: clip for clip in project["clips"]}
+    conflicts = []
+    for snapshot in preview["clips"]:
+        clip = clips_by_id.get(snapshot["id"])
+        if clip is None:
+            conflicts.append({"id": snapshot["id"], "reason": "deleted", "current": None})
+            continue
+        current = {
+            "tag_type": clip["tag_type"],
+            "players": list(clip.get("players", [])),
+            "start": clip["start"],
+            "end": clip["end"],
+            "label": clip["label"],
+            "notes": clip.get("notes", ""),
+        }
+        if _clip_fingerprint(clip) != snapshot:
+            conflicts.append({
+                "id": snapshot["id"], "reason": "modified", "current": current,
+            })
+
+    if conflicts:
+        return jsonify({
+            "error": "Clips changed after preview; refresh and preview again",
+            "code": "stale",
+            "conflicts": conflicts,
+        }), 409
+
+    clip_ids = [snapshot["id"] for snapshot in preview["clips"]]
+    for clip_id in clip_ids:
+        clip = clips_by_id[clip_id]
+        if "tag_type" in changes:
+            clip["tag_type"] = changes["tag_type"]
+        if "players" in changes:
+            clip["players"] = list(changes["players"])
+    _save_projects(projects)
+    return jsonify({"updated": len(clip_ids), "clip_ids": clip_ids})
 
 
 # ── Annotations CRUD ──────────────────────────────────────────────────

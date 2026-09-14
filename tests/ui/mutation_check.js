@@ -1,0 +1,98 @@
+// Run with: node tests/ui/mutation_check.js
+const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
+const crypto = require("node:crypto");
+const { spawnSync } = require("node:child_process");
+
+const ROOT = path.resolve(__dirname, "../.."), APP_PATH = path.join(ROOT, "static/js/app.js");
+const TEST_FILES = ["tests/ui/bulk_serialization.test.js", "tests/ui/bulk_keyboard.test.js"];
+
+function replaceExact(source, pattern, replacement, name, after = 0) {
+  const at = source.indexOf(pattern, after);
+  if (at < 0) throw new Error(`${name}: pattern absent: ${JSON.stringify(pattern)}`);
+  return source.slice(0, at) + replacement + source.slice(at + pattern.length);
+}
+
+const MUTANTS = [
+  {
+    name: "guard-dropped",
+    apply(source) {
+      return replaceExact(source, "bulkApplyPending = { projectId };",
+        "bulkApplyPending = null;", this.name);
+    },
+  },
+  {
+    name: "capture-after-await",
+    apply(source) {
+      let mutated = replaceExact(source,
+        "  const tagType = $bulkTagType.value;\n  const player = $bulkPlayer.value;",
+        "  let tagType, player;", this.name);
+      mutated = replaceExact(mutated, "    const data = await res.json();",
+        "    const data = await res.json();\n    tagType = $bulkTagType.value;\n    player = $bulkPlayer.value;",
+        this.name, mutated.indexOf("  let tagType, player;"));
+      return mutated;
+    },
+  },
+  {
+    name: "tab-not-prevented",
+    apply(source) {
+      return replaceExact(source,
+        "        controls[nextIndex].focus();\n      }\n      e.preventDefault();",
+        "        controls[nextIndex].focus();\n      }", this.name);
+    },
+  },
+];
+
+function runSuite(appPath) {
+  const run = spawnSync(process.execPath, ["--test", "--test-timeout=2000", ...TEST_FILES], {
+    cwd: ROOT,
+    env: { ...process.env, APP_JS_PATH: appPath },
+    encoding: "utf8",
+  });
+  if (run.error) throw run.error;
+  // Node 24's default spec reporter uses ℹ; TAP and earlier defaults use #.
+  const passed = run.stdout.match(/^(?:#|ℹ) pass (\d+)$/m);
+  const failed = run.stdout.match(/^(?:#|ℹ) fail (\d+)$/m);
+  if (!passed || !failed) {
+    throw new Error(`test summary missing for ${appPath}:\n${run.stdout}\n${run.stderr}`);
+  }
+  return { tests_failed: Number(failed[1]), tests_passed: Number(passed[1]) };
+}
+
+const hash = source => crypto.createHash("sha256").update(source).digest("hex");
+
+function main() {
+  const sourceBytes = fs.readFileSync(APP_PATH), source = sourceBytes.toString("utf8");
+  const before = hash(sourceBytes);
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gametape-mutants-"));
+  let after;
+  let results;
+  try {
+    const baseline = {
+      name: "baseline", target_file: APP_PATH, replacement_applied: false,
+      ...runSuite(APP_PATH), killed: false,
+    };
+    const mutants = MUTANTS.map(mutant => {
+      const target = path.join(tempDir, `${mutant.name}.js`);
+      fs.writeFileSync(target, mutant.apply(source));
+      const outcome = runSuite(target);
+      return {
+        name: mutant.name, target_file: target, replacement_applied: true,
+        ...outcome, killed: outcome.tests_failed >= 1,
+      };
+    });
+    results = { baseline, mutants };
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    after = hash(fs.readFileSync(APP_PATH));
+    if (before !== after) throw new Error("static/js/app.js changed during mutation check");
+  }
+  results.source_sha256_before = before;
+  results.source_sha256_after = after;
+  results.source_unchanged = true;
+  console.log(JSON.stringify(results, null, 2));
+  if (results.baseline.tests_failed || results.mutants.some(item => !item.killed)) {
+    process.exitCode = 1;
+  }
+}
+
+main();

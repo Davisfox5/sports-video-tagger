@@ -6,6 +6,10 @@ let filterPresets = [];
 let selectedPresetId = "";
 let applyingPreset = false;
 let projectViewVersion = 0;
+let bulkPreview = null;
+let bulkPreviewGeneration = 0;
+let bulkApplyPending = null;
+const BULK_APPLY_STATUS = "Applying… wait for the current batch";
 
 /* ── DOM refs ─────────────────────────────────────────────────────── */
 const $projectListScreen = document.getElementById("project-list-screen");
@@ -44,6 +48,18 @@ const $presetStatus = document.getElementById("preset-status");
 const $btnPresetSave   = document.getElementById("btn-preset-save");
 const $btnPresetRename = document.getElementById("btn-preset-rename");
 const $btnPresetDelete = document.getElementById("btn-preset-delete");
+
+const $bulkModal      = document.getElementById("bulk-modal");
+const $bulkTagType    = document.getElementById("bulk-tag-type");
+const $bulkPlayer     = document.getElementById("bulk-player");
+const $bulkAffected   = document.getElementById("bulk-affected");
+const $bulkPreviewBody = document.getElementById("bulk-preview-body");
+const $bulkStatus     = document.getElementById("bulk-status");
+const $btnBulkEdit    = document.getElementById("btn-bulk-edit");
+const $btnBulkPreview = document.getElementById("btn-bulk-preview");
+const $btnBulkConfirm = document.getElementById("btn-bulk-confirm");
+const $btnBulkRefresh = document.getElementById("btn-bulk-refresh");
+const $btnBulkCancel  = document.getElementById("btn-bulk-cancel");
 
 const $tagModal     = document.getElementById("tag-modal");
 const $tagTypeList  = document.getElementById("tag-type-list");
@@ -120,6 +136,9 @@ $newProjectName.addEventListener("keydown", (e) => {
 /* ── Open / Close Project ─────────────────────────────────────────── */
 async function openProject(id) {
   const version = ++projectViewVersion;
+  $bulkModal.classList.remove("active");
+  $taggingScreen.inert = false;
+  invalidateBulkPreview();
   const project = await api(`/api/projects/${id}`);
   if (version !== projectViewVersion) return;
   currentProject = project;
@@ -164,8 +183,11 @@ async function openProject(id) {
   loadFilterPresets();
 }
 
-document.getElementById("btn-back").addEventListener("click", () => {
+function closeProject() {
   projectViewVersion++;
+  $bulkModal.classList.remove("active");
+  $taggingScreen.inert = false;
+  invalidateBulkPreview();
   exitAnnotationMode();
   currentProject = null;
   filterPresets = [];
@@ -181,7 +203,9 @@ document.getElementById("btn-back").addEventListener("click", () => {
   $taggingScreen.classList.remove("active");
   $projectListScreen.classList.add("active");
   loadProjects();
-});
+}
+
+document.getElementById("btn-back").addEventListener("click", closeProject);
 
 /* ── Video Upload ─────────────────────────────────────────────────── */
 $videoUpload.addEventListener("change", async (e) => {
@@ -337,6 +361,7 @@ function filteredClips() {
 }
 
 function renderClips() {
+  invalidateBulkPreview();
   const clips = filteredClips();
   $clipCount.textContent = clips.length;
   $clipsList.innerHTML = "";
@@ -788,6 +813,347 @@ $presetName.addEventListener("keydown", (e) => {
   }
 });
 
+/* ── Bulk edit preview ────────────────────────────────────────────── */
+function setBulkStatus(message, kind) {
+  const text = message || "";
+  const whiteSpace = text.includes("\n") ? "pre-line" : "";
+  const className = "preset-status" + (kind ? ` ${kind}` : "");
+  if ($bulkStatus.textContent !== text) $bulkStatus.textContent = text;
+  if ($bulkStatus.style.whiteSpace !== whiteSpace) $bulkStatus.style.whiteSpace = whiteSpace;
+  if ($bulkStatus.className !== className) $bulkStatus.className = className;
+}
+
+function bulkApplyBusy() {
+  return Boolean(bulkApplyPending && currentProject
+    && bulkApplyPending.projectId === currentProject.id);
+}
+
+function bulkFocusableControls(
+  controls = $bulkModal.querySelectorAll("select, button")
+) {
+  return Array.from(controls)
+    .filter(control => !control.disabled && !control.hidden);
+}
+
+function keepBulkFocusInside(previouslyFocused = document.activeElement) {
+  if (!$bulkModal.classList.contains("active")) return;
+  const active = document.activeElement;
+  if ($bulkModal.contains(active) && !active.disabled && !active.hidden) return;
+
+  const controls = Array.from($bulkModal.querySelectorAll("select, button"));
+  const focusable = bulkFocusableControls(controls);
+  const focusableSet = new Set(focusable);
+  const previousIndex = controls.indexOf(previouslyFocused);
+  const next = previousIndex < 0 ? null : controls.slice(previousIndex + 1)
+    .find(control => focusableSet.has(control));
+  const fallback = focusableSet.has($btnBulkCancel) ? $btnBulkCancel : focusable[0];
+  (next || fallback)?.focus();
+}
+
+function invalidateBulkPreview() {
+  const previouslyFocused = document.activeElement;
+  bulkPreview = null;
+  bulkPreviewGeneration++;
+  const applyBusy = bulkApplyBusy();
+  setBulkStatus(applyBusy ? BULK_APPLY_STATUS : "");
+  $btnBulkPreview.disabled = applyBusy;
+  $btnBulkConfirm.disabled = true;
+  $btnBulkRefresh.hidden = true;
+  $bulkPreviewBody.innerHTML = "";
+  $bulkAffected.textContent = currentProject ? filteredClips().length : 0;
+  keepBulkFocusInside(previouslyFocused);
+}
+
+function addBulkOption(select, value, label) {
+  const option = document.createElement("option");
+  option.value = value;
+  option.innerHTML = esc(label);
+  select.appendChild(option);
+}
+
+function populateBulkSelects(tagType = "", playerId = "") {
+  $bulkTagType.innerHTML = '<option value="">Keep tag type</option>';
+  (currentProject.tag_types || []).forEach(type => addBulkOption($bulkTagType, type.name, type.name));
+  $bulkPlayer.innerHTML = '<option value="">Keep players</option><option value="__clear__">Clear players</option>';
+  (currentProject.players || []).forEach(player => addBulkOption(
+    $bulkPlayer, player.id, player.number ? `#${player.number} ${player.name}` : player.name
+  ));
+  if (Array.from($bulkTagType.options).some(option => option.value === tagType)) {
+    $bulkTagType.value = tagType;
+  }
+  if (Array.from($bulkPlayer.options).some(option => option.value === playerId)) {
+    $bulkPlayer.value = playerId;
+  }
+}
+
+function openBulkModal() {
+  if (!currentProject) return;
+  invalidateBulkPreview();
+  populateBulkSelects();
+  $bulkTagType.value = "";
+  $bulkPlayer.value = "";
+  const count = filteredClips().length;
+  $bulkAffected.textContent = count;
+  if (bulkApplyBusy()) setBulkStatus(BULK_APPLY_STATUS);
+  else setBulkStatus(count ? "" : "No clips match the current filter");
+  $bulkModal.classList.add("active");
+  $taggingScreen.inert = true;
+  $bulkTagType.focus();
+}
+
+function closeBulkModal() {
+  $bulkModal.classList.remove("active");
+  $taggingScreen.inert = false;
+  invalidateBulkPreview();
+  $btnBulkEdit.focus();
+}
+
+function formatBulkValues(values) {
+  const players = (values.players || []).map(playerId => esc(getPlayerDisplay(playerId))).join(", ") || "no player";
+  return `${esc(values.tag_type)} &middot; ${players}`;
+}
+
+async function previewBulkEdit() {
+  if (!currentProject) return;
+  if (bulkApplyBusy()) {
+    const previouslyFocused = document.activeElement;
+    $btnBulkPreview.disabled = true;
+    keepBulkFocusInside(previouslyFocused);
+    setBulkStatus(BULK_APPLY_STATUS);
+    return;
+  }
+  invalidateBulkPreview();
+  const clipIds = filteredClips().map(clip => clip.id);
+  $bulkAffected.textContent = clipIds.length;
+  if (!clipIds.length) {
+    setBulkStatus("No clips match the current filter");
+    return;
+  }
+  const changes = {};
+  if ($bulkTagType.value) changes.tag_type = $bulkTagType.value;
+  if ($bulkPlayer.value === "__clear__") changes.players = [];
+  else if ($bulkPlayer.value) changes.players = [$bulkPlayer.value];
+  if (!Object.keys(changes).length) {
+    setBulkStatus("Choose a new tag type or player", "error");
+    return;
+  }
+  const generation = bulkPreviewGeneration;
+  const projectId = currentProject.id;
+  setBulkStatus("Previewing…");
+  const previouslyFocused = document.activeElement;
+  $btnBulkPreview.disabled = true;
+  keepBulkFocusInside(previouslyFocused);
+  try {
+    const res = await fetch(`/api/projects/${projectId}/clips/bulk_preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clip_ids: clipIds, changes }),
+    });
+    if (generation !== bulkPreviewGeneration || !currentProject || currentProject.id !== projectId) return;
+    const data = await res.json();
+    if (generation !== bulkPreviewGeneration || !currentProject || currentProject.id !== projectId) return;
+    if (res.status !== 200) {
+      setBulkStatus(data.error || "Request failed", "error");
+      return;
+    }
+    if (!Number.isInteger(data.count) || data.count < 0 || !Array.isArray(data.clips))
+      return setBulkStatus("Request failed", "error");
+    if (data.count === 0) {
+      setBulkStatus("All selected clips already have these values");
+      return;
+    }
+    bulkPreview = { previewId: data.preview_id, projectId: data.project_id,
+      clipIds: data.clips.map(clip => clip.id) };
+    $bulkAffected.textContent = data.count;
+    $bulkPreviewBody.innerHTML = data.clips.map(clip => `
+      <tr>
+        <td>${fmt(clip.start)}–${fmt(clip.end)} ${esc(clip.label || "")}</td>
+        <td>${formatBulkValues(clip.before)}</td>
+        <td>${formatBulkValues(clip.after)}</td>
+      </tr>`).join("");
+    $btnBulkConfirm.disabled = false;
+    setBulkStatus(`${data.count} clip(s) will change`);
+  } catch (err) {
+    if (generation === bulkPreviewGeneration && currentProject && currentProject.id === projectId) {
+      setBulkStatus("Request failed", "error");
+    }
+  } finally {
+    if (generation === bulkPreviewGeneration && currentProject && currentProject.id === projectId
+        && !bulkApplyBusy()) {
+      $btnBulkPreview.disabled = false;
+    }
+  }
+}
+
+function showBulkRecovery(message) {
+  const previouslyFocused = document.activeElement;
+  bulkPreview = null;
+  $bulkPreviewBody.innerHTML = "";
+  $btnBulkConfirm.disabled = true;
+  $btnBulkRefresh.hidden = false;
+  setBulkStatus(message, "error");
+  keepBulkFocusInside(previouslyFocused);
+}
+
+async function applyBulkEdit() {
+  if (bulkApplyBusy()) {
+    const previouslyFocused = document.activeElement;
+    $btnBulkPreview.disabled = true;
+    $btnBulkConfirm.disabled = true;
+    keepBulkFocusInside(previouslyFocused);
+    setBulkStatus(BULK_APPLY_STATUS);
+    return;
+  }
+  if (!bulkPreview || !currentProject || bulkPreview.projectId !== currentProject.id) return;
+  // Keep the single pending marker from being overwritten after a project
+  // switch. Other projects can still preview while this request is pending.
+  if (bulkApplyPending) {
+    setBulkStatus(BULK_APPLY_STATUS);
+    return;
+  }
+  const generation = bulkPreviewGeneration;
+  const projectId = bulkPreview.projectId;
+  const previewId = bulkPreview.previewId;
+  const tagType = $bulkTagType.value;
+  const player = $bulkPlayer.value;
+  setBulkStatus(BULK_APPLY_STATUS);
+  const previouslyFocused = document.activeElement;
+  $btnBulkConfirm.disabled = true;
+  $btnBulkPreview.disabled = true;
+  keepBulkFocusInside(previouslyFocused);
+  bulkApplyPending = { projectId };
+  try {
+    const res = await fetch(`/api/projects/${projectId}/clips/bulk_apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ preview_id: previewId }),
+    });
+    const data = await res.json();
+    if (!currentProject || currentProject.id !== projectId) return;
+    const stillCurrent = generation === bulkPreviewGeneration;
+    const modalOpen = $bulkModal.classList.contains("active");
+    if (res.status === 200 && Array.isArray(data.clip_ids)) {
+      const updated = Number.isInteger(data.updated) && data.updated >= 0
+        ? data.updated : data.clip_ids.length;
+      data.clip_ids.forEach(id => {
+        const clip = currentProject.clips.find(candidate => candidate.id === id);
+        if (!clip) return;
+        if (tagType) clip.tag_type = tagType;
+        if (player === "__clear__") clip.players = [];
+        else if (player) clip.players = [player];
+      });
+      // A committed success is authoritative for this project. Rendering also
+      // invalidates any newer preview before its confirmation can be reused.
+      renderClips();
+      renderTimeline();
+      if (modalOpen) {
+        if (stillCurrent) {
+          $bulkTagType.value = "";
+          $bulkPlayer.value = "";
+        }
+        setBulkStatus(stillCurrent
+          ? `${updated} clip(s) updated`
+          : `${updated} clip(s) updated — preview again`, "ok");
+        $btnBulkConfirm.disabled = true;
+        $btnBulkRefresh.hidden = true;
+        $btnBulkPreview.disabled = false;
+      }
+      return;
+    }
+    if (!stillCurrent) return;
+    if (res.status === 409 && data.code === "stale") {
+      const conflicts = Array.isArray(data.conflicts) ? data.conflicts : [];
+      const summaries = conflicts.slice(0, 5).map(conflict => {
+        if (conflict.reason === "deleted" || !conflict.current) return `${conflict.id}: deleted`;
+        const current = conflict.current;
+        const label = current.label || conflict.id;
+        const players = (current.players || []).map(getPlayerDisplay).join(", ") || "no player";
+        return `${label}: modified (now ${current.tag_type} · ${players})`;
+      });
+      if (conflicts.length > summaries.length) {
+        summaries.push(`+${conflicts.length - summaries.length} more conflict(s)`);
+      }
+      showBulkRecovery([data.error || "Clips changed after preview", ...summaries].join("\n"));
+      return;
+    }
+    showBulkRecovery(data.error || "Request failed");
+  } catch (err) {
+    if (generation !== bulkPreviewGeneration || !currentProject || currentProject.id !== projectId) return;
+    showBulkRecovery("Request failed");
+  } finally {
+    if (bulkApplyPending && bulkApplyPending.projectId === projectId) {
+      bulkApplyPending = null;
+    }
+    if (currentProject && currentProject.id === projectId
+        && $bulkModal.classList.contains("active")) {
+      $btnBulkPreview.disabled = false;
+    }
+  }
+}
+
+async function refreshBulkProject() {
+  if (!currentProject) return;
+  const version = projectViewVersion;
+  const generation = bulkPreviewGeneration;
+  const projectId = currentProject.id;
+  const bulkTagType = $bulkTagType.value;
+  const bulkPlayer = $bulkPlayer.value;
+  const clipTagType = $clipTagType.value;
+  const clipPlayers = new Set(getSelectedPlayerIds());
+  const annotationClipId = annClip ? annClip.id : null;
+  setBulkStatus("Refreshing…");
+  const previouslyFocused = document.activeElement;
+  $btnBulkPreview.disabled = true;
+  $btnBulkRefresh.hidden = true;
+  keepBulkFocusInside(previouslyFocused);
+  try {
+    const project = await api(`/api/projects/${projectId}`);
+    if (generation !== bulkPreviewGeneration || version !== projectViewVersion
+        || !currentProject || currentProject.id !== projectId) return;
+    if (!project || project.error || !Array.isArray(project.clips)) throw new Error("Refresh failed");
+    currentProject.clips = project.clips;
+    currentProject.players = project.players || [];
+    currentProject.tag_types = project.tag_types;
+    populateTagSelectors();
+    populatePlayerSelectors();
+    if (Array.from($clipTagType.options).some(option => option.value === clipTagType)) {
+      $clipTagType.value = clipTagType;
+    }
+    $playerChecks.querySelectorAll('input[type="checkbox"]').forEach(checkbox => {
+      checkbox.checked = clipPlayers.has(checkbox.value);
+      checkbox.closest(".player-chip").classList.toggle("selected", checkbox.checked);
+    });
+    if (annotationClipId) {
+      annClip = currentProject.clips.find(clip => clip.id === annotationClipId) || null;
+      if (!annClip) exitAnnotationMode();
+    }
+    renderClips();
+    renderTimeline();
+    populateBulkSelects(bulkTagType, bulkPlayer);
+    $bulkAffected.textContent = filteredClips().length;
+    $btnBulkRefresh.hidden = true;
+    setBulkStatus("Refreshed — preview again");
+  } catch (err) {
+    if (generation !== bulkPreviewGeneration || version !== projectViewVersion
+        || !currentProject || currentProject.id !== projectId) return;
+    setBulkStatus("Refresh failed", "error");
+    $btnBulkRefresh.hidden = false;
+  } finally {
+    if (generation === bulkPreviewGeneration && version === projectViewVersion
+        && currentProject && currentProject.id === projectId && !bulkApplyBusy()) {
+      $btnBulkPreview.disabled = false;
+    }
+  }
+}
+
+$btnBulkEdit.addEventListener("click", openBulkModal);
+$btnBulkCancel.addEventListener("click", closeBulkModal);
+$btnBulkPreview.addEventListener("click", previewBulkEdit);
+$btnBulkConfirm.addEventListener("click", applyBulkEdit);
+$btnBulkRefresh.addEventListener("click", refreshBulkProject);
+$bulkTagType.addEventListener("change", invalidateBulkPreview);
+$bulkPlayer.addEventListener("change", invalidateBulkPreview);
+
 /* ── Export ────────────────────────────────────────────────────────── */
 function buildFilterParams() {
   const params = new URLSearchParams();
@@ -1121,6 +1487,26 @@ function renderRecordingsList() {
 
 /* ── Keyboard Shortcuts ───────────────────────────────────────────── */
 document.addEventListener("keydown", (e) => {
+  if ($bulkModal.classList.contains("active")) {
+    if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const controls = bulkFocusableControls();
+      if (controls.length) {
+        const currentIndex = controls.indexOf(document.activeElement);
+        const nextIndex = currentIndex < 0
+          ? (e.shiftKey ? controls.length - 1 : 0)
+          : (currentIndex + (e.shiftKey ? -1 : 1) + controls.length) % controls.length;
+        controls[nextIndex].focus();
+      }
+      e.preventDefault();
+      return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeBulkModal();
+    }
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
   // Only on tagging screen, not in inputs
   if (!currentProject) return;
   if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA") return;
@@ -1135,6 +1521,12 @@ document.addEventListener("keydown", (e) => {
     case "p":
       e.preventDefault();
       $presetSelect.focus();
+      break;
+    case "b":
+      if (!document.querySelector(".modal-overlay.active")) {
+        e.preventDefault();
+        openBulkModal();
+      }
       break;
     case " ":
       e.preventDefault();

@@ -135,6 +135,10 @@
         <span class="preset-keys" title="Keyboard shortcuts">P select · Enter save</span>
         <span id="preset-status" class="preset-status" role="status" aria-live="polite"></span>
       </div>
+      <div class="bulk-bar">
+        <button type="button" id="btn-bulk-edit" class="preset-btn" title="Bulk edit filtered clips (B)">Bulk edit</button>
+        <span class="preset-keys">B bulk edit</span>
+      </div>
       <div id="clips-list"></div>
       <div class="clip-count"><span id="clip-count-num">0</span> clips</div>
       <div class="export-bar">
@@ -143,6 +147,43 @@
         <button id="btn-export-json" class="export-btn">JSON</button>
         <button id="btn-export-video" class="export-btn">Video</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Bulk Edit Modal ──────────────────────────────────────────────── -->
+<div id="bulk-modal" class="modal-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="bulk-modal-title">
+    <h3 id="bulk-modal-title">Bulk edit <span id="bulk-affected">0</span> filtered clips</h3>
+    <div class="bulk-form">
+      <label for="bulk-tag-type">Tag type</label>
+      <select id="bulk-tag-type">
+        <option value="">Keep tag type</option>
+      </select>
+      <label for="bulk-player">Set players to</label>
+      <select id="bulk-player">
+        <option value="">Keep players</option>
+        <option value="__clear__">Clear players</option>
+      </select>
+    </div>
+    <div class="bulk-preview-wrap">
+      <table id="bulk-preview-table" class="bulk-preview-table" aria-label="Affected clips before and after">
+        <thead>
+          <tr>
+            <th>Clip</th>
+            <th>Before</th>
+            <th>After</th>
+          </tr>
+        </thead>
+        <tbody id="bulk-preview-body"></tbody>
+      </table>
+    </div>
+    <div id="bulk-status" class="preset-status" role="status" aria-live="polite"></div>
+    <div class="bulk-actions">
+      <button type="button" id="btn-bulk-preview" class="preset-btn">Preview</button>
+      <button type="button" id="btn-bulk-confirm" class="preset-btn" disabled>Confirm</button>
+      <button type="button" id="btn-bulk-refresh" class="preset-btn" hidden>Refresh</button>
+      <button type="button" id="btn-bulk-cancel" class="preset-btn">Cancel (Esc)</button>
     </div>
   </div>
 </div>
