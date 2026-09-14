@@ -11,6 +11,8 @@ import json
 import uuid
 import subprocess
 import tempfile
+import threading
+import functools
 from flask import Flask, jsonify, request, send_from_directory, send_file, render_template
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
@@ -38,6 +40,17 @@ def _save_projects(projects):
         json.dump(projects, f, indent=2)
 
 
+_STORE_LOCK = threading.RLock()
+
+
+def _locked(fn):
+    @functools.wraps(fn)
+    def wrapper(*a, **kw):
+        with _STORE_LOCK:
+            return fn(*a, **kw)
+    return wrapper
+
+
 # ── Pages ──────────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -54,6 +67,7 @@ def list_projects():
 
 
 @app.route("/api/projects", methods=["POST"])
+@_locked
 def create_project():
     data = request.json
     name = data.get("name", "").strip()
@@ -93,6 +107,7 @@ def get_project(project_id):
 
 
 @app.route("/api/projects/<project_id>", methods=["DELETE"])
+@_locked
 def delete_project(project_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -111,6 +126,7 @@ def delete_project(project_id):
 # ── Video upload ───────────────────────────────────────────────────────────
 
 @app.route("/api/projects/<project_id>/video", methods=["POST"])
+@_locked
 def upload_video(project_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -139,6 +155,7 @@ def serve_video(filename):
 # ── Tag types ──────────────────────────────────────────────────────────────
 
 @app.route("/api/projects/<project_id>/tag_types", methods=["PUT"])
+@_locked
 def update_tag_types(project_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -167,6 +184,7 @@ def list_players(project_id):
 
 
 @app.route("/api/projects/<project_id>/players", methods=["POST"])
+@_locked
 def create_player(project_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -197,6 +215,7 @@ def create_player(project_id):
 
 
 @app.route("/api/projects/<project_id>/players/<player_id>", methods=["PUT"])
+@_locked
 def update_player(project_id, player_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -213,6 +232,7 @@ def update_player(project_id, player_id):
 
 
 @app.route("/api/projects/<project_id>/players/<player_id>", methods=["DELETE"])
+@_locked
 def delete_player(project_id, player_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -225,6 +245,7 @@ def delete_player(project_id, player_id):
 
 
 @app.route("/api/projects/<project_id>/players/import", methods=["POST"])
+@_locked
 def import_roster(project_id):
     """Import players from an Excel (.xlsx/.xls) or CSV file.
 
@@ -380,6 +401,7 @@ def list_filter_presets(project_id):
 
 
 @app.route("/api/projects/<project_id>/filter_presets", methods=["POST"])
+@_locked
 def create_filter_preset(project_id):
     projects = _load_projects()
     project = projects.get(project_id)
@@ -415,6 +437,7 @@ def create_filter_preset(project_id):
 
 
 @app.route("/api/projects/<project_id>/filter_presets/<preset_id>", methods=["PUT"])
+@_locked
 def update_filter_preset(project_id, preset_id):
     projects = _load_projects()
     project = projects.get(project_id)
@@ -449,6 +472,7 @@ def update_filter_preset(project_id, preset_id):
 
 
 @app.route("/api/projects/<project_id>/filter_presets/<preset_id>", methods=["DELETE"])
+@_locked
 def delete_filter_preset(project_id, preset_id):
     projects = _load_projects()
     project = projects.get(project_id)
@@ -475,6 +499,7 @@ def list_clips(project_id):
 
 
 @app.route("/api/projects/<project_id>/clips", methods=["POST"])
+@_locked
 def create_clip(project_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -501,6 +526,7 @@ def create_clip(project_id):
 
 
 @app.route("/api/projects/<project_id>/clips/<clip_id>", methods=["PUT"])
+@_locked
 def update_clip(project_id, clip_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -521,6 +547,7 @@ def update_clip(project_id, clip_id):
 
 
 @app.route("/api/projects/<project_id>/clips/<clip_id>", methods=["DELETE"])
+@_locked
 def delete_clip(project_id, clip_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -546,6 +573,7 @@ def list_annotations(project_id, clip_id):
 
 
 @app.route("/api/projects/<project_id>/clips/<clip_id>/annotations", methods=["POST"])
+@_locked
 def create_annotation(project_id, clip_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -574,6 +602,7 @@ def create_annotation(project_id, clip_id):
 
 
 @app.route("/api/projects/<project_id>/clips/<clip_id>/annotations/<ann_id>", methods=["PUT"])
+@_locked
 def update_annotation(project_id, clip_id, ann_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -596,6 +625,7 @@ def update_annotation(project_id, clip_id, ann_id):
 
 
 @app.route("/api/projects/<project_id>/clips/<clip_id>/annotations/<ann_id>", methods=["DELETE"])
+@_locked
 def delete_annotation(project_id, clip_id, ann_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -611,6 +641,7 @@ def delete_annotation(project_id, clip_id, ann_id):
 
 
 @app.route("/api/projects/<project_id>/clips/<clip_id>/annotations", methods=["DELETE"])
+@_locked
 def clear_annotations(project_id, clip_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -638,6 +669,7 @@ def list_recordings(project_id, clip_id):
 
 
 @app.route("/api/projects/<project_id>/clips/<clip_id>/recordings", methods=["POST"])
+@_locked
 def upload_recording(project_id, clip_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -673,6 +705,7 @@ def upload_recording(project_id, clip_id):
 
 
 @app.route("/api/projects/<project_id>/clips/<clip_id>/recordings/<rec_id>", methods=["DELETE"])
+@_locked
 def delete_recording(project_id, clip_id, rec_id):
     projects = _load_projects()
     if project_id not in projects:
@@ -813,6 +846,7 @@ def _adjust_clips_after_edit(clips, time_offset, removed_ranges=None):
 
 
 @app.route("/api/projects/<project_id>/video/trim", methods=["POST"])
+@_locked
 def trim_video(project_id):
     """Trim the video to keep only the segment between start and end."""
     projects = _load_projects()
@@ -849,6 +883,7 @@ def trim_video(project_id):
 
 
 @app.route("/api/projects/<project_id>/video/split", methods=["POST"])
+@_locked
 def split_video(project_id):
     """Split the video at a timestamp into two projects."""
     projects = _load_projects()
@@ -920,6 +955,7 @@ def split_video(project_id):
 
 
 @app.route("/api/projects/<project_id>/video/cut", methods=["POST"])
+@_locked
 def cut_video(project_id):
     """Remove a section from the middle of the video (e.g., halftime)."""
     projects = _load_projects()
@@ -1119,6 +1155,7 @@ def export_json(project_id):
 
 
 @app.route("/api/projects/<project_id>/export/video", methods=["POST"])
+@_locked
 def export_video(project_id):
     projects = _load_projects()
     if project_id not in projects:
