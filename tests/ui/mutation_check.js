@@ -14,6 +14,19 @@ function replaceExact(source, pattern, replacement, name, after = 0) {
 
 const MUTANTS = [
   {
+    name: "late-success-discarded",
+    apply(source) {
+      const start = source.indexOf("async function applyBulkEdit()");
+      const end = source.indexOf("async function refreshBulkProject()", start);
+      if (start < 0 || end < 0) throw new Error(`${this.name}: apply function not found`);
+      const body = replaceExact(source.slice(start, end),
+        "    if (!currentProject || currentProject.id !== projectId) return;",
+        "    if (generation !== bulkPreviewGeneration || !currentProject || currentProject.id !== projectId) return;",
+        this.name);
+      return source.slice(0, start) + body + source.slice(end);
+    },
+  },
+  {
     name: "guard-dropped",
     apply(source) {
       return replaceExact(source, "bulkApplyPending = { projectId };",
@@ -43,10 +56,11 @@ const MUTANTS = [
 ];
 
 function runSuite(appPath) {
-  const run = spawnSync(process.execPath, ["--test", "--test-timeout=2000", ...TEST_FILES], {
+  const run = spawnSync(process.execPath, ["--test", "--test-timeout=2000", "--test-reporter=tap", ...TEST_FILES], {
     cwd: ROOT,
-    env: { ...process.env, APP_JS_PATH: appPath },
+    env: { ...process.env, APP_JS_PATH: appPath, FORCE_COLOR: "0" },
     encoding: "utf8",
+    timeout: 10000,
   });
   if (run.error) throw run.error;
   // Node 24's default spec reporter uses ℹ; TAP and earlier defaults use #.
@@ -55,7 +69,10 @@ function runSuite(appPath) {
   if (!passed || !failed) {
     throw new Error(`test summary missing for ${appPath}:\n${run.stdout}\n${run.stderr}`);
   }
-  return { tests_failed: Number(failed[1]), tests_passed: Number(passed[1]) };
+  return {
+    tests_failed: Number(failed[1]), tests_passed: Number(passed[1]), exit_code: run.status,
+    failed_tests: [...run.stdout.matchAll(/^not ok \d+ - (.+)$/gm)].map(match => match[1]),
+  };
 }
 
 const hash = source => crypto.createHash("sha256").update(source).digest("hex");
@@ -90,7 +107,7 @@ function main() {
   results.source_sha256_after = after;
   results.source_unchanged = true;
   console.log(JSON.stringify(results, null, 2));
-  if (results.baseline.tests_failed || results.mutants.some(item => !item.killed)) {
+  if (results.baseline.exit_code !== 0 || !results.baseline.tests_passed || results.baseline.tests_failed || results.mutants.some(item => !item.killed)) {
     process.exitCode = 1;
   }
 }

@@ -166,7 +166,10 @@ append). **Preview** posts `{clip_ids, changes}` for the current filter. Confirm
 disabled and enables only when a non-null preview is stored. The Clip / Before / After
 table shows `start–end label` and `tag_type · player names` (`no player` when empty).
 Press Enter on the focused **Confirm** button (native) or click it. Success writes
-`N clip(s) updated` and resets both selects to keep. **Cancel (Esc)** closes.
+`N clip(s) updated` and resets both selects to keep only if the preview generation
+is unchanged. If choices changed or the modal was reopened while applying, the
+committed result still appears, current choices are preserved, and the status asks
+for a new preview. **Cancel (Esc)** closes.
 
 `#bulk-status` (`role="status"` `aria-live="polite"`):
 
@@ -192,7 +195,7 @@ Measured in this slice:
 
 ```
 $ /tmp/gametape-trial-env/bin/python -m pytest -q
-100 passed in 1.91s
+100 passed in 1.96s
 
 $ node --check static/js/app.js
 ```
@@ -239,15 +242,22 @@ fixes by exact replacement, and runs `tests/ui/bulk_serialization.test.js` and
 `tests/ui/bulk_keyboard.test.js` with `APP_JS_PATH` set to each copy (not
 `load_app.test.js`). Production `static/js/app.js` is SHA-256 hashed before and after
 and remained `a5613bc53459065dbac499f922cab6a0f44d056936c3673e57fc647dfa60707b`.
-Observed (uncolored spec reporter; `FORCE_COLOR` can hide the `#`/`ℹ` summary
-prefixes the harness parses):
+Final caller-verified results (the mutation subprocess uses uncolored TAP):
 
 ```
-baseline:             7 passed, 0 failed
-guard-dropped:        5 passed, 1 failed, killed
-capture-after-await:  6 passed, 1 failed, killed
-tab-not-prevented:    4 passed, 3 failed, killed
+baseline:                7 passed, 0 failed
+late-success-discarded:   5 passed, 2 failed, killed
+guard-dropped:            4 passed, 3 failed, killed
+capture-after-await:     5 passed, 2 failed, killed
+tab-not-prevented:       4 passed, 3 failed, killed
 ```
+
+The caller strengthened the serialization tests to dispatch real `change` events,
+check the committed clip state after dismissal/reopen, and assert the second
+request count before awaiting it. Before that correction, restoring the original
+generation-based lost-success bug passed all three serialization tests; now it
+fails both relevant cases. All four mutants complete with explicit failures and
+no cancelled tests. Production code is unchanged by these test corrections.
 
 Limitations: single-process only (see Deployment boundary). `_BULK_PREVIEWS` has no
 size cap; idle entries live until 600s lazy prune. `export_video`, `trim_video`,

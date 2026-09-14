@@ -43,15 +43,22 @@ async function preview(app, gate, id = "A") {
 
 const applyCalls = app => app.calls.fetch.filter(call => call.path.endsWith("/bulk_apply"));
 
-test("committed apply uses selector values captured at Confirm", async () => {
+test("committed apply survives change events with captured values", async () => {
   const { app, gates } = setup();
   await preview(app, gates.previewA);
   const applying = app.evalInApp("applyBulkEdit()");
   app.evalInApp("document.getElementById('bulk-tag-type').value = 'Goal'; document.getElementById('bulk-player').value = '__clear__'");
+  for (const id of ["bulk-tag-type", "bulk-player"]) {
+    app.document.getElementById(id).dispatchEvent(app.document.createEvent("change"));
+  }
+  assert.equal(app.document.getElementById("btn-bulk-preview").disabled, true);
+  assert.equal(app.document.getElementById("btn-bulk-confirm").disabled, true);
   gates.applyA.resolve({ updated: 1, clip_ids: ["A-c1"] });
   await applying;
   assert.equal(app.evalInApp("currentProject.clips[0].tag_type"), "Shot");
   assert.equal(app.evalInApp("currentProject.clips[0].players.join(',')"), "p2");
+  assert.equal(app.document.getElementById("bulk-tag-type").value, "Goal");
+  assert.equal(app.document.getElementById("bulk-player").value, "__clear__");
   assert.match(app.evalInApp("document.getElementById('bulk-status').textContent"), /updated/);
   assert.equal(app.evalInApp("bulkApplyPending"), null);
 });
@@ -68,6 +75,9 @@ test("dismiss and reopen keeps same-project apply busy", async () => {
   gates.applyA.resolve({ updated: 1, clip_ids: ["A-c1"] });
   await applying;
   assert.equal(app.document.getElementById("btn-bulk-preview").disabled, false);
+  assert.equal(app.evalInApp("currentProject.clips[0].tag_type"), "Shot");
+  assert.equal(app.evalInApp("currentProject.clips[0].players.join(',')"), "p2");
+  assert.match(app.evalInApp("document.getElementById('bulk-status').textContent"), /updated/);
   assert.equal(app.evalInApp("bulkApplyPending"), null);
 });
 
@@ -76,8 +86,9 @@ test("another project may preview but cannot confirm during pending apply", asyn
   await preview(app, gates.previewA);
   const applying = app.evalInApp("applyBulkEdit()");
   await preview(app, gates.previewB, "B");
-  await app.evalInApp("applyBulkEdit()");
+  const secondApply = app.evalInApp("applyBulkEdit()");
   assert.equal(applyCalls(app).length, 1);
+  await secondApply;
   assert.equal(app.evalInApp("document.getElementById('bulk-status').textContent"), app.evalInApp("BULK_APPLY_STATUS"));
   const displayed = app.evalInApp("JSON.stringify({ clips: currentProject.clips, status: document.getElementById('bulk-status').textContent })");
   gates.applyA.resolve({ updated: 1, clip_ids: ["A-c1"] });
