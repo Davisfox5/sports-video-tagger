@@ -90,9 +90,13 @@ test("another project may preview but cannot confirm during pending apply", asyn
   assert.equal(applyCalls(app).length, 1);
   await secondApply;
   assert.equal(app.evalInApp("document.getElementById('bulk-status').textContent"), app.evalInApp("BULK_APPLY_STATUS"));
-  const displayed = app.evalInApp("JSON.stringify({ clips: currentProject.clips, status: document.getElementById('bulk-status').textContent })");
+  const displayed = app.evalInApp("JSON.stringify(currentProject.clips)");
   gates.applyA.resolve({ updated: 1, clip_ids: ["A-c1"] });
   await applying;
-  assert.equal(app.evalInApp("JSON.stringify({ clips: currentProject.clips, status: document.getElementById('bulk-status').textContent })"), displayed);
+  assert.equal(app.evalInApp("JSON.stringify(currentProject.clips)"), displayed);
+  // The wait is over: B's dialog gets its own preview state back.
+  assert.equal(app.evalInApp("document.getElementById('bulk-status').textContent"), "1 clip(s) will change");
+  assert.equal(app.document.getElementById("btn-bulk-confirm").disabled, false);
+  assert.equal(app.document.getElementById("btn-bulk-preview").disabled, false);
   assert.equal(app.evalInApp("bulkApplyPending"), null);
 });
