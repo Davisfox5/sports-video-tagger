@@ -4,7 +4,7 @@ const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 
 const ROOT = path.resolve(__dirname, "../.."), APP_PATH = path.join(ROOT, "static/js/app.js");
-const TEST_FILES = ["tests/ui/bulk_serialization.test.js", "tests/ui/bulk_keyboard.test.js"];
+const TEST_FILES = ["tests/ui/bulk_serialization.test.js", "tests/ui/bulk_keyboard.test.js", "tests/ui/bulk_coverage.test.js"];
 
 function replaceExact(source, pattern, replacement, name, after = 0) {
   const at = source.indexOf(pattern, after);
@@ -46,11 +46,54 @@ const MUTANTS = [
     },
   },
   {
+    name: "busy-ignores-project",
+    apply(source) {
+      return replaceExact(source,
+        "  return Boolean(bulkApplyPending && currentProject\n    && bulkApplyPending.projectId === currentProject.id);",
+        "  return Boolean(bulkApplyPending);", this.name);
+    },
+  },
+  {
+    name: "stale-preview-restored",
+    apply(source) {
+      const guard = "    if (generation !== bulkPreviewGeneration || !currentProject || currentProject.id !== projectId) return;\n";
+      const start = source.indexOf("async function previewBulkEdit()");
+      if (start < 0) throw new Error(`${this.name}: preview function not found`);
+      let body = source.slice(start);
+      for (let i = 0; i < 2; i++) body = replaceExact(body, guard, "", this.name);
+      return source.slice(0, start) + body;
+    },
+  },
+  {
+    name: "apply-ignores-preview-project",
+    apply(source) {
+      return replaceExact(source,
+        "  if (!bulkPreview || !currentProject || bulkPreview.projectId !== currentProject.id) return;",
+        "  if (!bulkPreview || !currentProject) return;", this.name);
+    },
+  },
+  {
+    name: "settle-focus-dropped",
+    apply(source) {
+      return replaceExact(source,
+        "  if (target && $bulkModal.contains(target) && !target.disabled && !target.hidden) target.focus();",
+        "", this.name);
+    },
+  },
+  {
+    name: "tab-keeps-parked-ownership",
+    apply(source) {
+      return replaceExact(source,
+        "      // The user chose where focus is now, even if that is the parked control.\n      bulkAutoFocused = null;\n",
+        "", this.name);
+    },
+  },
+  {
     name: "tab-not-prevented",
     apply(source) {
       return replaceExact(source,
-        "        controls[nextIndex].focus();\n      }\n      e.preventDefault();",
-        "        controls[nextIndex].focus();\n      }", this.name);
+        "      bulkAutoFocused = null;\n      e.preventDefault();",
+        "      bulkAutoFocused = null;", this.name);
     },
   },
 ];

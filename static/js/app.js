@@ -9,6 +9,9 @@ let projectViewVersion = 0;
 let bulkPreview = null;
 let bulkPreviewGeneration = 0;
 let bulkApplyPending = null;
+// The control keepBulkFocusInside() parked focus on while a request was in
+// flight, or null when focus was left where the user put it.
+let bulkAutoFocused = null;
 const BULK_APPLY_STATUS = "Applying… wait for the current batch";
 
 /* ── DOM refs ─────────────────────────────────────────────────────── */
@@ -53,6 +56,7 @@ const $bulkModal      = document.getElementById("bulk-modal");
 const $bulkTagType    = document.getElementById("bulk-tag-type");
 const $bulkPlayer     = document.getElementById("bulk-player");
 const $bulkAffected   = document.getElementById("bulk-affected");
+const $bulkPreviewWrap = document.getElementById("bulk-preview-wrap");
 const $bulkPreviewBody = document.getElementById("bulk-preview-body");
 const $bulkStatus     = document.getElementById("bulk-status");
 const $btnBulkEdit    = document.getElementById("btn-bulk-edit");
@@ -829,18 +833,23 @@ function bulkApplyBusy() {
 }
 
 function bulkFocusableControls(
-  controls = $bulkModal.querySelectorAll("select, button")
+  controls = $bulkModal.querySelectorAll("select, button, [tabindex]")
 ) {
-  return Array.from(controls)
-    .filter(control => !control.disabled && !control.hidden);
+  return Array.from(controls).filter(control => !control.disabled && !control.hidden
+    && (control !== $bulkPreviewWrap || $bulkPreviewBody.children.length > 0));
 }
 
 function keepBulkFocusInside(previouslyFocused = document.activeElement) {
   if (!$bulkModal.classList.contains("active")) return;
   const active = document.activeElement;
-  if ($bulkModal.contains(active) && !active.disabled && !active.hidden) return;
+  if ($bulkModal.contains(active) && !active.disabled && !active.hidden) {
+    // Focus is somewhere usable. If it is not where we parked it, the user
+    // moved, and a later settle must not move it again.
+    if (active !== bulkAutoFocused) bulkAutoFocused = null;
+    return;
+  }
 
-  const controls = Array.from($bulkModal.querySelectorAll("select, button"));
+  const controls = Array.from($bulkModal.querySelectorAll("select, button, [tabindex]"));
   const focusable = bulkFocusableControls(controls);
   const focusableSet = new Set(focusable);
   const previousIndex = controls.indexOf(previouslyFocused);
@@ -848,6 +857,18 @@ function keepBulkFocusInside(previouslyFocused = document.activeElement) {
     .find(control => focusableSet.has(control));
   const fallback = focusableSet.has($btnBulkCancel) ? $btnBulkCancel : focusable[0];
   (next || fallback)?.focus();
+  bulkAutoFocused = document.activeElement;
+}
+
+// When a request settles, move focus to the control that continues the flow,
+// but only if focus is still where keepBulkFocusInside() parked it. Someone
+// who moved elsewhere during the request keeps their place.
+function settleBulkFocus(target) {
+  const parked = bulkAutoFocused;
+  bulkAutoFocused = null;
+  if (!parked || !$bulkModal.classList.contains("active")) return;
+  if (document.activeElement !== parked) return;
+  if (target && $bulkModal.contains(target) && !target.disabled && !target.hidden) target.focus();
 }
 
 function invalidateBulkPreview() {
@@ -888,6 +909,7 @@ function populateBulkSelects(tagType = "", playerId = "") {
 
 function openBulkModal() {
   if (!currentProject) return;
+  bulkAutoFocused = null;
   invalidateBulkPreview();
   populateBulkSelects();
   $bulkTagType.value = "";
@@ -904,6 +926,7 @@ function openBulkModal() {
 function closeBulkModal() {
   $bulkModal.classList.remove("active");
   $taggingScreen.inert = false;
+  bulkAutoFocused = null;
   invalidateBulkPreview();
   $btnBulkEdit.focus();
 }
@@ -943,6 +966,7 @@ async function previewBulkEdit() {
   const previouslyFocused = document.activeElement;
   $btnBulkPreview.disabled = true;
   keepBulkFocusInside(previouslyFocused);
+  let focusTarget = $btnBulkPreview;
   try {
     const res = await fetch(`/api/projects/${projectId}/clips/bulk_preview`, {
       method: "POST",
@@ -963,7 +987,7 @@ async function previewBulkEdit() {
       return;
     }
     bulkPreview = { previewId: data.preview_id, projectId: data.project_id,
-      clipIds: data.clips.map(clip => clip.id) };
+      count: data.count, clipIds: data.clips.map(clip => clip.id) };
     $bulkAffected.textContent = data.count;
     $bulkPreviewBody.innerHTML = data.clips.map(clip => `
       <tr>
@@ -973,6 +997,7 @@ async function previewBulkEdit() {
       </tr>`).join("");
     $btnBulkConfirm.disabled = false;
     setBulkStatus(`${data.count} clip(s) will change`);
+    focusTarget = $btnBulkConfirm;
   } catch (err) {
     if (generation === bulkPreviewGeneration && currentProject && currentProject.id === projectId) {
       setBulkStatus("Request failed", "error");
@@ -981,6 +1006,7 @@ async function previewBulkEdit() {
     if (generation === bulkPreviewGeneration && currentProject && currentProject.id === projectId
         && !bulkApplyBusy()) {
       $btnBulkPreview.disabled = false;
+      settleBulkFocus(focusTarget);
     }
   }
 }
@@ -993,6 +1019,7 @@ function showBulkRecovery(message) {
   $btnBulkRefresh.hidden = false;
   setBulkStatus(message, "error");
   keepBulkFocusInside(previouslyFocused);
+  settleBulkFocus($btnBulkRefresh);
 }
 
 async function applyBulkEdit() {
@@ -1057,6 +1084,7 @@ async function applyBulkEdit() {
         $btnBulkConfirm.disabled = true;
         $btnBulkRefresh.hidden = true;
         $btnBulkPreview.disabled = false;
+        settleBulkFocus($btnBulkPreview);
       }
       return;
     }
@@ -1086,6 +1114,13 @@ async function applyBulkEdit() {
     }
     if (currentProject && currentProject.id === projectId
         && $bulkModal.classList.contains("active")) {
+      $btnBulkPreview.disabled = false;
+    } else if (currentProject && $bulkModal.classList.contains("active")
+        && $bulkStatus.textContent === BULK_APPLY_STATUS) {
+      // Another project's dialog was told to wait for this batch; tell it the
+      // wait is over and restore its own preview state.
+      setBulkStatus(bulkPreview && bulkPreview.projectId === currentProject.id
+        ? `${bulkPreview.count} clip(s) will change` : "");
       $btnBulkPreview.disabled = false;
     }
   }
@@ -1133,11 +1168,14 @@ async function refreshBulkProject() {
     $bulkAffected.textContent = filteredClips().length;
     $btnBulkRefresh.hidden = true;
     setBulkStatus("Refreshed — preview again");
+    $btnBulkPreview.disabled = bulkApplyBusy();
+    settleBulkFocus($btnBulkPreview);
   } catch (err) {
     if (generation !== bulkPreviewGeneration || version !== projectViewVersion
         || !currentProject || currentProject.id !== projectId) return;
     setBulkStatus("Refresh failed", "error");
     $btnBulkRefresh.hidden = false;
+    settleBulkFocus($btnBulkRefresh);
   } finally {
     if (generation === bulkPreviewGeneration && version === projectViewVersion
         && currentProject && currentProject.id === projectId && !bulkApplyBusy()) {
@@ -1153,6 +1191,11 @@ $btnBulkConfirm.addEventListener("click", applyBulkEdit);
 $btnBulkRefresh.addEventListener("click", refreshBulkProject);
 $bulkTagType.addEventListener("change", invalidateBulkPreview);
 $bulkPlayer.addEventListener("change", invalidateBulkPreview);
+// A pointer or programmatic focus change the app did not make ends automatic
+// focus ownership; keepBulkFocusInside() re-asserts it after its own focus().
+$bulkModal.addEventListener("focusin", (e) => {
+  if (e.target !== bulkAutoFocused) bulkAutoFocused = null;
+});
 
 /* ── Export ────────────────────────────────────────────────────────── */
 function buildFilterParams() {
@@ -1497,6 +1540,8 @@ document.addEventListener("keydown", (e) => {
           : (currentIndex + (e.shiftKey ? -1 : 1) + controls.length) % controls.length;
         controls[nextIndex].focus();
       }
+      // The user chose where focus is now, even if that is the parked control.
+      bulkAutoFocused = null;
       e.preventDefault();
       return;
     }

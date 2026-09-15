@@ -124,7 +124,9 @@ project, including after dismiss/reopen (`closeBulkModal()` then `openBulkModal(
 Another project may Preview (`previewBulkEdit()` sends POST `bulk_preview`). Its
 Confirm is refused until the pending apply settles: `applyBulkEdit()` sees the global
 marker, sends no `bulk_apply`, shows `BULK_APPLY_STATUS`, and does not replace the
-marker.
+marker. When the pending apply settles while that other project's dialog is open and
+still showing `BULK_APPLY_STATUS`, the dialog is released: the status returns to
+`N clip(s) will change` (or empty when no preview is stored) and Preview is enabled.
 
 Tag type and player (`$bulkTagType.value`, `$bulkPlayer.value`) are captured at
 Confirm before `fetch`, so later selector changes do not alter the committed batch.
@@ -135,16 +137,27 @@ invalidates preview state and would clear it.
 ## Keyboard and focus
 
 While `#bulk-modal` is `active`, Tab and Shift+Tab (without Ctrl/Meta/Alt) cycle only
-enabled, non-hidden `select`/`button` controls in DOM order
-(`bulkFocusableControls()`), wrap at both ends, and `preventDefault`. All other
+enabled, non-hidden `select`/`button`/`[tabindex]` controls in DOM order
+(`bulkFocusableControls()`), wrap at both ends, and `preventDefault`. The preview
+scroller `#bulk-preview-wrap` (`tabindex="0"`, `role="region"`) joins the cycle only
+while the table has rows, so a keyboard user can reach and scroll a long preview. All other
 shortcuts (I/O/P/Space/B) are suppressed: the modal `keydown` branch returns without
 reaching those bindings. Escape closes the dialog (drops `active`,
 `$taggingScreen.inert` is false) and restores focus to `#btn-bulk-edit`.
 
 When Preview, Confirm, or Refresh disable or hide their button, focus is moved
 immediately to the next enabled modal control (`keepBulkFocusInside()`) rather than
-falling to `body`. Native Enter activation and layout are covered only by
-real-browser acceptance.
+falling to `body`, and that parking spot is remembered (`bulkAutoFocused`). When the
+request settles, `settleBulkFocus(target)` moves focus to the control that continues
+the flow, but only if the app still owns the parking spot. Ownership ends the moment
+the user navigates: any Tab inside the dialog (even one that lands back on the parked
+control), any `focusin` the app did not cause, and closing or reopening the dialog all
+clear it, so anyone who moved during the request keeps their place. Targets: a successful Preview focuses **Confirm**; a
+failed or no-op Preview returns to **Preview**; a committed apply focuses **Preview**;
+a conflict or request failure focuses **Refresh**; a completed Refresh focuses
+**Preview**. Without this, Enter on Preview followed by Enter again closed the dialog,
+because focus had parked on Cancel. Native Enter activation and layout are covered by
+`tests/browser/`.
 
 ## Deployment boundary
 
@@ -228,40 +241,82 @@ promises, no sleeps. `APP_JS_PATH` selects an alternate script.
 
 ```
 $ node --test tests/ui/*.test.js
-ℹ tests 8
-ℹ pass 8
+ℹ tests 18
+ℹ pass 18
 ℹ fail 0
 ```
+
+`tests/ui/bulk_coverage.test.js` adds the interleavings the first harness left
+uncovered: a preview returning after a filter change or a project switch, a second
+project's preview actually reaching the server (and its dialog being released when the
+pending batch settles), Confirm refusing a stored preview from another project, focus
+settling on Confirm / Preview / Refresh, focus the user moved being left alone, and the
+preview scroller joining the Tab cycle only while it has rows.
 
 ```
 $ node tests/ui/mutation_check.js
 ```
 
 The mutation script copies `static/js/app.js` to disposable temp files, undoes named
-fixes by exact replacement, and runs `tests/ui/bulk_serialization.test.js` and
-`tests/ui/bulk_keyboard.test.js` with `APP_JS_PATH` set to each copy (not
-`load_app.test.js`). Production `static/js/app.js` is SHA-256 hashed before and after
-and remained `a5613bc53459065dbac499f922cab6a0f44d056936c3673e57fc647dfa60707b`.
-Final caller-verified results (the mutation subprocess uses uncolored TAP):
+fixes by exact replacement, and runs the serialization, keyboard and coverage suites
+with `APP_JS_PATH` set to each copy (not `load_app.test.js`). Production
+`static/js/app.js` is SHA-256 hashed before and after and must be unchanged. The
+mutation subprocess uses uncolored TAP. Measured after the focus/scroller/status
+changes:
 
 ```
-baseline:                7 passed, 0 failed
-late-success-discarded:   5 passed, 2 failed, killed
-guard-dropped:            4 passed, 3 failed, killed
-capture-after-await:     5 passed, 2 failed, killed
-tab-not-prevented:       4 passed, 3 failed, killed
+baseline:                      17 passed, 0 failed
+late-success-discarded:        15 passed, 2 failed, killed
+guard-dropped:                 13 passed, 4 failed, killed
+capture-after-await:           15 passed, 2 failed, killed
+busy-ignores-project:          15 passed, 2 failed, killed
+stale-preview-restored:        15 passed, 2 failed, killed
+apply-ignores-preview-project: 16 passed, 1 failed, killed
+settle-focus-dropped:          15 passed, 2 failed, killed
+tab-keeps-parked-ownership:    16 passed, 1 failed, killed
+tab-not-prevented:             14 passed, 3 failed, killed
 ```
+
+The first four mutants were the original set; the independent review showed the
+next three survived the original suite, so the coverage tests above were written to
+kill them; `tab-keeps-parked-ownership` covers Codex's finding that Tab back onto the
+parked control must count as the user's choice. Nine killed mutants prove those nine
+checks, not broad coverage.
 
 The caller strengthened the serialization tests to dispatch real `change` events,
 check the committed clip state after dismissal/reopen, and assert the second
 request count before awaiting it. Before that correction, restoring the original
 generation-based lost-success bug passed all three serialization tests; now it
-fails both relevant cases. All four mutants complete with explicit failures and
-no cancelled tests. Production code is unchanged by these test corrections.
+fails both relevant cases.
+
+## Real-browser checks
+
+`tests/browser/` is self-contained: `server.py` serves this checkout from a
+disposable data directory with two synthetic projects and adds a test-only
+`POST /__test/reset` route; `run.js` starts it on a free port, resets the fixtures
+before every scenario in `scenarios/`, runs each on a fresh page, and writes
+`tests/browser/output/results.json` plus screenshots (the directory is ignored by
+git). It needs Node with Playwright and a Chromium build; without them it exits 2
+and says so, which is not a pass.
+
+```
+$ node tests/browser/run.js            # all scenarios
+$ node tests/browser/run.js keyboard   # by name
+```
+
+Scenarios: core workflow (22 checks), late preview after a filter change, late
+preview after a project switch, delayed committed success after a selection change,
+apply serialization across dismiss/reopen and project navigation (10 checks),
+keyboard containment, native Enter, scroller reach and settled focus (24 checks),
+Enter on Preview during a held request, and preset invalidation. When `ffmpeg` is on
+PATH the server generates a synthetic clip; otherwise an empty placeholder is used
+and the runner says so. A placeholder verifies the tagging interaction only, not
+media playback or ffmpeg behaviour.
 
 Limitations: single-process only (see Deployment boundary). `_BULK_PREVIEWS` has no
 size cap; idle entries live until 600s lazy prune. `export_video`, `trim_video`,
 `split_video`, and `cut_video` hold `_STORE_LOCK` across ffmpeg, stalling every store
-mutation including bulk apply. Eight real-browser scenarios were accepted by the
-caller, including native Enter activation and layout. The Node harness covers the
-deterministic interleavings.
+mutation including bulk apply; export never writes the store but reads the video file
+that trim/split/cut replace, so narrowing that lock is concurrency work that needs
+source snapshots and race tests, not a lock removal. The Node harness covers the
+deterministic interleavings; `tests/browser/` covers the real-browser ones.
