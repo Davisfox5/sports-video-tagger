@@ -149,6 +149,36 @@ test("focus the user moved during the request is left alone", async () => {
   assert.equal(app.document.activeElement.id, "bulk-player");
 });
 
+test("Tab that lands back on the parked control is still the user's choice", async () => {
+  // Codex's finding on d829b87: Shift+Tab away then Tab back to Cancel is a
+  // deliberate selection of Cancel, and the settle must not move it to Confirm.
+  const { app, gates } = setup();
+  await openWithTag(app, "A");
+  get(app, "btn-bulk-preview").focus();
+  const pending = app.evalInApp("previewBulkEdit()");
+  assert.equal(app.document.activeElement.id, "btn-bulk-cancel");
+  key(app, "Tab", true);
+  assert.equal(app.document.activeElement.id, "bulk-player");
+  key(app, "Tab");
+  assert.equal(app.document.activeElement.id, "btn-bulk-cancel");
+  gates.previewA.resolve(previewFor("A", "A-c1"));
+  await pending;
+  assert.equal(app.document.activeElement.id, "btn-bulk-cancel");
+  assert.equal(get(app, "btn-bulk-confirm").disabled, false);
+});
+
+test("closing and reopening the dialog forgets any parked focus", async () => {
+  const { app, gates } = setup();
+  await openWithTag(app, "A");
+  get(app, "btn-bulk-preview").focus();
+  const pending = app.evalInApp("previewBulkEdit()");
+  app.evalInApp("closeBulkModal(); openBulkModal(); document.getElementById('bulk-tag-type').value = 'Goal'");
+  get(app, "btn-bulk-cancel").focus();
+  gates.previewA.resolve(previewFor("A", "A-c1"));
+  await pending;
+  assert.equal(app.document.activeElement.id, "btn-bulk-cancel");
+});
+
 test("a failed preview returns focus to Preview; a conflict moves it to Refresh", async () => {
   const { app, gates } = setup();
   await openWithTag(app, "A");

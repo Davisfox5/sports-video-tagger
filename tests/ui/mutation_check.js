@@ -81,11 +81,19 @@ const MUTANTS = [
     },
   },
   {
+    name: "tab-keeps-parked-ownership",
+    apply(source) {
+      return replaceExact(source,
+        "      // The user chose where focus is now, even if that is the parked control.\n      bulkAutoFocused = null;\n",
+        "", this.name);
+    },
+  },
+  {
     name: "tab-not-prevented",
     apply(source) {
       return replaceExact(source,
-        "        controls[nextIndex].focus();\n      }\n      e.preventDefault();",
-        "        controls[nextIndex].focus();\n      }", this.name);
+        "      bulkAutoFocused = null;\n      e.preventDefault();",
+        "      bulkAutoFocused = null;", this.name);
     },
   },
 ];

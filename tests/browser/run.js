@@ -50,13 +50,18 @@ async function main() {
   const filter = process.argv.slice(2);
   const files = fs.readdirSync(SCENARIOS).filter(name => name.endsWith(".js")).sort()
     .filter(name => !filter.length || filter.some(word => name.includes(word)));
+  if (!files.length) {
+    console.error(`No scenario matches ${JSON.stringify(filter)}; available: ${fs.readdirSync(SCENARIOS).join(", ")}`);
+    process.exit(2);
+  }
   fs.mkdirSync(OUT, { recursive: true });
   const { proc, info } = await startServer();
   const launch = {};
   if (process.env.GAMETAPE_CHROMIUM) launch.executablePath = process.env.GAMETAPE_CHROMIUM;
-  const browser = await playwright.chromium.launch(launch);
   const results = { media: info.media, scenarios: {}, console: [], pageErrors: [] };
+  let browser = null;
   try {
+    browser = await playwright.chromium.launch(launch);
     for (const file of files) {
       const name = file.replace(/\.js$/, "");
       const context = await browser.newContext();
@@ -86,7 +91,7 @@ async function main() {
       await context.close();
     }
   } finally {
-    await browser.close();
+    if (browser) await browser.close();
     proc.kill("SIGTERM");
   }
   // Media 416s come from the placeholder video, not the application.

@@ -909,6 +909,7 @@ function populateBulkSelects(tagType = "", playerId = "") {
 
 function openBulkModal() {
   if (!currentProject) return;
+  bulkAutoFocused = null;
   invalidateBulkPreview();
   populateBulkSelects();
   $bulkTagType.value = "";
@@ -925,6 +926,7 @@ function openBulkModal() {
 function closeBulkModal() {
   $bulkModal.classList.remove("active");
   $taggingScreen.inert = false;
+  bulkAutoFocused = null;
   invalidateBulkPreview();
   $btnBulkEdit.focus();
 }
@@ -1189,6 +1191,11 @@ $btnBulkConfirm.addEventListener("click", applyBulkEdit);
 $btnBulkRefresh.addEventListener("click", refreshBulkProject);
 $bulkTagType.addEventListener("change", invalidateBulkPreview);
 $bulkPlayer.addEventListener("change", invalidateBulkPreview);
+// A pointer or programmatic focus change the app did not make ends automatic
+// focus ownership; keepBulkFocusInside() re-asserts it after its own focus().
+$bulkModal.addEventListener("focusin", (e) => {
+  if (e.target !== bulkAutoFocused) bulkAutoFocused = null;
+});
 
 /* ── Export ────────────────────────────────────────────────────────── */
 function buildFilterParams() {
@@ -1533,6 +1540,8 @@ document.addEventListener("keydown", (e) => {
           : (currentIndex + (e.shiftKey ? -1 : 1) + controls.length) % controls.length;
         controls[nextIndex].focus();
       }
+      // The user chose where focus is now, even if that is the parked control.
+      bulkAutoFocused = null;
       e.preventDefault();
       return;
     }
