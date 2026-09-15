@@ -149,8 +149,10 @@ When Preview, Confirm, or Refresh disable or hide their button, focus is moved
 immediately to the next enabled modal control (`keepBulkFocusInside()`) rather than
 falling to `body`, and that parking spot is remembered (`bulkAutoFocused`). When the
 request settles, `settleBulkFocus(target)` moves focus to the control that continues
-the flow, but only if focus is still on the parked control; anyone who moved during
-the request keeps their place. Targets: a successful Preview focuses **Confirm**; a
+the flow, but only if the app still owns the parking spot. Ownership ends the moment
+the user navigates: any Tab inside the dialog (even one that lands back on the parked
+control), any `focusin` the app did not cause, and closing or reopening the dialog all
+clear it, so anyone who moved during the request keeps their place. Targets: a successful Preview focuses **Confirm**; a
 failed or no-op Preview returns to **Preview**; a committed apply focuses **Preview**;
 a conflict or request failure focuses **Refresh**; a completed Refresh focuses
 **Preview**. Without this, Enter on Preview followed by Enter again closed the dialog,
@@ -239,8 +241,8 @@ promises, no sleeps. `APP_JS_PATH` selects an alternate script.
 
 ```
 $ node --test tests/ui/*.test.js
-ℹ tests 16
-ℹ pass 16
+ℹ tests 18
+ℹ pass 18
 ℹ fail 0
 ```
 
@@ -263,20 +265,23 @@ mutation subprocess uses uncolored TAP. Measured after the focus/scroller/status
 changes:
 
 ```
-baseline:                      15 passed, 0 failed
-late-success-discarded:        13 passed, 2 failed, killed
-guard-dropped:                 11 passed, 4 failed, killed
-capture-after-await:           13 passed, 2 failed, killed
-busy-ignores-project:          13 passed, 2 failed, killed
-stale-preview-restored:        13 passed, 2 failed, killed
-apply-ignores-preview-project: 14 passed, 1 failed, killed
-settle-focus-dropped:          13 passed, 2 failed, killed
-tab-not-prevented:             12 passed, 3 failed, killed
+baseline:                      17 passed, 0 failed
+late-success-discarded:        15 passed, 2 failed, killed
+guard-dropped:                 13 passed, 4 failed, killed
+capture-after-await:           15 passed, 2 failed, killed
+busy-ignores-project:          15 passed, 2 failed, killed
+stale-preview-restored:        15 passed, 2 failed, killed
+apply-ignores-preview-project: 16 passed, 1 failed, killed
+settle-focus-dropped:          15 passed, 2 failed, killed
+tab-keeps-parked-ownership:    16 passed, 1 failed, killed
+tab-not-prevented:             14 passed, 3 failed, killed
 ```
 
 The first four mutants were the original set; the independent review showed the
 next three survived the original suite, so the coverage tests above were written to
-kill them. Eight killed mutants prove those eight checks, not broad coverage.
+kill them; `tab-keeps-parked-ownership` covers Codex's finding that Tab back onto the
+parked control must count as the user's choice. Nine killed mutants prove those nine
+checks, not broad coverage.
 
 The caller strengthened the serialization tests to dispatch real `change` events,
 check the committed clip state after dismissal/reopen, and assert the second
